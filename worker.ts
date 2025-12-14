@@ -1,4 +1,5 @@
 import { parse as parseYaml } from "yaml";
+import { Stripe } from "stripe";
 
 type ContentType = {
   type: "content" | "binary";
@@ -15,12 +16,23 @@ type NestedObject<T = null> = {
 interface CompiledGitignore {
   accepts: (input: string) => boolean;
   denies: (input: string) => boolean;
-  maybe: (input: string) => boolean;
+}
+
+interface UserAccount {
+  credit: number; // in cents
+  username: string;
+  profile_picture: string;
+  private_granted: boolean;
+  premium: boolean;
 }
 
 interface Env {
   GITHUB_CLIENT_ID: string;
   GITHUB_CLIENT_SECRET: string;
+  STRIPE_SECRET: string;
+  STRIPE_PAYMENT_LINK: string;
+  STRIPE_WEBHOOK_SIGNING_SECRET: string;
+  KV: KVNamespace;
 }
 
 interface OAuthState {
@@ -33,10 +45,77 @@ interface OAuthState {
 
 const CHARACTERS_PER_TOKEN = 5;
 const DEFAULT_MAX_TOKENS = 50000;
+const PRIVATE_REPO_COST_CENTS = 1; // $0.01
 const DEFAULT_GENIGNORE = `package-lock.json
 build
 node_modules
 `;
+
+// ZIP signatures
+const LOCAL_FILE_HEADER = 0x04034b50;
+const CENTRAL_DIR_HEADER = 0x02014b50;
+
+// ==================== KV USER HELPERS ====================
+
+async function getUserAccount(
+  userId: string,
+  env: Env,
+): Promise<UserAccount | null> {
+  const data = await env.KV.get(`user_${userId}`, "json");
+  return data as UserAccount | null;
+}
+
+async function setUserAccount(
+  userId: string,
+  account: UserAccount,
+  env: Env,
+): Promise<void> {
+  await env.KV.put(`user_${userId}`, JSON.stringify(account));
+}
+
+async function createOrUpdateUser(
+  userId: string,
+  userData: { username: string; profile_picture: string },
+  env: Env,
+): Promise<UserAccount> {
+  const existing = await getUserAccount(userId, env);
+  if (existing) {
+    // Update username and profile picture but keep other fields
+    const updated = {
+      ...existing,
+      username: userData.username,
+      profile_picture: userData.profile_picture,
+    };
+    await setUserAccount(userId, updated, env);
+    return updated;
+  }
+
+  const newAccount: UserAccount = {
+    credit: 0,
+    username: userData.username,
+    profile_picture: userData.profile_picture,
+    private_granted: false,
+    premium: false,
+  };
+  await setUserAccount(userId, newAccount, env);
+  return newAccount;
+}
+
+async function chargeForPrivateRepo(
+  userId: string,
+  env: Env,
+): Promise<{ success: boolean; message: string }> {
+  const account = await getUserAccount(userId, env);
+  if (!account) {
+    return { success: false, message: "Account not found" };
+  }
+  if (account.credit < PRIVATE_REPO_COST_CENTS) {
+    return { success: false, message: "Insufficient credit" };
+  }
+  account.credit -= PRIVATE_REPO_COST_CENTS;
+  await setUserAccount(userId, account, env);
+  return { success: true, message: "Charged successfully" };
+}
 
 // ==================== OAUTH HELPERS ====================
 
@@ -95,6 +174,19 @@ function getCurrentUser(request: Request): any | null {
     return sessionData.user;
   } catch {
     return null;
+  }
+}
+
+function getSessionScopes(request: Request): string {
+  const cookies = parseCookies(request.headers.get("Cookie") || "");
+  const sessionToken = cookies.session;
+  if (!sessionToken) return "";
+  try {
+    const sessionData = JSON.parse(atob(sessionToken));
+    if (Date.now() > sessionData.exp) return "";
+    return sessionData.scopes || "";
+  } catch {
+    return "";
   }
 }
 
@@ -178,16 +270,38 @@ async function handleCallback(request: Request, env: Env): Promise<Response> {
     return new Response("Failed to get user info", { status: 400 });
   }
   const userData = (await userResponse.json()) as any;
+
+  // Get actual granted scopes from response headers
+  const grantedScopes = userResponse.headers.get("X-OAuth-Scopes") || "";
+
+  // Create or update user in KV
+  await createOrUpdateUser(
+    String(userData.id),
+    {
+      username: userData.login,
+      profile_picture: userData.avatar_url,
+    },
+    env,
+  );
+
+  // Update private_granted if repo scope was granted
+  if (grantedScopes.includes("repo")) {
+    const account = await getUserAccount(String(userData.id), env);
+    if (account) {
+      account.private_granted = true;
+      await setUserAccount(String(userData.id), account, env);
+    }
+  }
+
   const sessionData = {
     user: userData,
     accessToken: tokenData.access_token,
+    scopes: grantedScopes,
     exp: Date.now() + 7 * 24 * 3600 * 1000,
   };
-  console.log({ tokenData, sessionData });
   const sessionToken = btoa(JSON.stringify(sessionData));
   const headers = new Headers({ Location: state.redirectTo || "/" });
   const isLocalhost = url.hostname === "localhost";
-
   headers.append(
     "Set-Cookie",
     `oauth_state=; HttpOnly;${
@@ -206,9 +320,7 @@ async function handleCallback(request: Request, env: Env): Promise<Response> {
 async function handleLogout(request: Request): Promise<Response> {
   const url = new URL(request.url);
   const isLocalhost = url.hostname === "localhost";
-
   const redirectTo = url.searchParams.get("redirect_to") || "/";
-
   return new Response(null, {
     status: 302,
     headers: {
@@ -218,6 +330,107 @@ async function handleLogout(request: Request): Promise<Response> {
       } SameSite=Lax; Max-Age=0; Path=/`,
     },
   });
+}
+
+// ==================== STRIPE WEBHOOK HANDLER ====================
+
+const streamToBuffer = async (
+  readableStream: ReadableStream<Uint8Array>,
+): Promise<Uint8Array> => {
+  const chunks: Uint8Array[] = [];
+  const reader = readableStream.getReader();
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      chunks.push(value);
+    }
+  } finally {
+    reader.releaseLock();
+  }
+  const totalLength = chunks.reduce((acc, chunk) => acc + chunk.length, 0);
+  const result = new Uint8Array(totalLength);
+  let position = 0;
+  for (const chunk of chunks) {
+    result.set(chunk, position);
+    position += chunk.length;
+  }
+  return result;
+};
+
+async function handleStripeWebhook(
+  request: Request,
+  env: Env,
+): Promise<Response> {
+  if (!request.body) {
+    return new Response(JSON.stringify({ error: "No body" }), {
+      status: 400,
+      headers: { "Content-Type": "application/json" },
+    });
+  }
+
+  const rawBody = await streamToBuffer(request.body);
+  const rawBodyString = new TextDecoder().decode(rawBody);
+
+  const stripe = new Stripe(env.STRIPE_SECRET, {
+    apiVersion: "2025-11-17.clover",
+  });
+
+  const stripeSignature = request.headers.get("stripe-signature");
+  if (!stripeSignature) {
+    return new Response(JSON.stringify({ error: "No signature" }), {
+      status: 400,
+      headers: { "Content-Type": "application/json" },
+    });
+  }
+
+  let event: Stripe.Event;
+  try {
+    event = await stripe.webhooks.constructEventAsync(
+      rawBodyString,
+      stripeSignature,
+      env.STRIPE_WEBHOOK_SIGNING_SECRET,
+    );
+  } catch (err: any) {
+    console.log("Webhook error:", err.message);
+    return new Response(`Webhook error: ${String(err)}`, { status: 400 });
+  }
+
+  if (event.type === "checkout.session.completed") {
+    const session = event.data.object;
+
+    if (session.payment_status !== "paid" || !session.amount_subtotal) {
+      return new Response("Payment not completed", { status: 400 });
+    }
+
+    const { client_reference_id, amount_subtotal } = session;
+
+    if (!client_reference_id) {
+      return new Response("Missing client_reference_id", { status: 400 });
+    }
+
+    const userId = client_reference_id;
+    const account = await getUserAccount(userId, env);
+
+    if (account) {
+      account.credit += amount_subtotal;
+      await setUserAccount(userId, account, env);
+    } else {
+      // This shouldn't happen normally, but handle gracefully
+      const newAccount: UserAccount = {
+        credit: amount_subtotal,
+        username: "",
+        profile_picture: "",
+        private_granted: false,
+        premium: false,
+      };
+      await setUserAccount(userId, newAccount, env);
+    }
+
+    return new Response("Payment processed successfully", { status: 200 });
+  }
+
+  return new Response("Event not handled", { status: 200 });
 }
 
 // ==================== UTILITY FUNCTIONS ====================
@@ -295,30 +508,15 @@ function prepareRegexPattern(pattern: string): string {
   return escapeRegex(pattern).replace("**", "(.+)").replace("*", "([^\\/]+)");
 }
 
-function preparePartialRegex(pattern: string): string {
-  return pattern
-    .split("/")
-    .map((item, index) =>
-      index
-        ? `([\\/]?(${prepareRegexPattern(item)}\\b|$))`
-        : `(${prepareRegexPattern(item)}\\b)`,
-    )
-    .join("");
-}
-
 function createRegExp(patterns: string[]): RegExp {
   return patterns.length > 0
     ? new RegExp(`^((${patterns.join(")|(")}))`)
     : new RegExp("$^");
 }
 
-function prepareRegexes(pattern: string): [string, string] {
-  return [prepareRegexPattern(pattern), preparePartialRegex(pattern)];
-}
-
 function parseGitignore(content: string): {
-  positives: [RegExp, RegExp];
-  negatives: [RegExp, RegExp];
+  positives: RegExp;
+  negatives: RegExp;
 } {
   const lists: [string[], string[]] = content
     .split("\n")
@@ -334,22 +532,9 @@ function parseGitignore(content: string): {
       },
       [[], []] as [string[], string[]],
     );
-  const processedLists = lists.map((list) =>
-    list
-      .sort()
-      .map(prepareRegexes)
-      .reduce<[string[], string[]]>(
-        (acc, [exact, partial]) => {
-          acc[0].push(exact);
-          acc[1].push(partial);
-          return acc;
-        },
-        [[], []],
-      ),
-  );
   return {
-    positives: processedLists[0].map(createRegExp) as [RegExp, RegExp],
-    negatives: processedLists[1].map(createRegExp) as [RegExp, RegExp],
+    positives: createRegExp(lists[0].sort().map(prepareRegexPattern)),
+    negatives: createRegExp(lists[1].sort().map(prepareRegexPattern)),
   };
 }
 
@@ -360,36 +545,164 @@ function compileGitignore(content: string): CompiledGitignore {
   return {
     accepts: (input: string): boolean => {
       input = checkInput(input);
-      return negatives[0].test(input) || !positives[0].test(input);
+      return negatives.test(input) || !positives.test(input);
     },
     denies: (input: string): boolean => {
       input = checkInput(input);
-      return !(negatives[0].test(input) || !positives[0].test(input));
-    },
-    maybe: (input: string): boolean => {
-      input = checkInput(input);
-      return negatives[1].test(input) || !positives[1].test(input);
+      return !(negatives.test(input) || !positives.test(input));
     },
   };
 }
 
-// ==================== DEFLATE DECOMPRESSION ====================
+// ==================== STREAMING ZIP PARSER ====================
 
-/**
- * Decompress DEFLATE-compressed data using the DecompressionStream API
- * This handles ZIP files that use compression method 8 (DEFLATE)
- */
+class StreamingZipReader {
+  private buffer: Uint8Array = new Uint8Array(0);
+  private reader: ReadableStreamDefaultReader<Uint8Array>;
+  private done: boolean = false;
+
+  constructor(stream: ReadableStream<Uint8Array>) {
+    this.reader = stream.getReader();
+  }
+
+  private async ensureBytes(needed: number): Promise<boolean> {
+    while (this.buffer.length < needed && !this.done) {
+      const { done, value } = await this.reader.read();
+      if (done) {
+        this.done = true;
+        break;
+      }
+      const newBuffer = new Uint8Array(this.buffer.length + value.length);
+      newBuffer.set(this.buffer, 0);
+      newBuffer.set(value, this.buffer.length);
+      this.buffer = newBuffer;
+    }
+    return this.buffer.length >= needed;
+  }
+
+  private consume(bytes: number): Uint8Array {
+    const result = this.buffer.slice(0, bytes);
+    this.buffer = this.buffer.slice(bytes);
+    return result;
+  }
+
+  private readUint16(offset: number = 0): number {
+    return this.buffer[offset] | (this.buffer[offset + 1] << 8);
+  }
+
+  private readUint32(offset: number = 0): number {
+    return (
+      this.buffer[offset] |
+      (this.buffer[offset + 1] << 8) |
+      (this.buffer[offset + 2] << 16) |
+      (this.buffer[offset + 3] << 24)
+    );
+  }
+
+  async *entries(): AsyncGenerator<{
+    fileName: string;
+    getData: () => Promise<Uint8Array | null>;
+  }> {
+    while (true) {
+      if (!(await this.ensureBytes(4))) break;
+
+      const signature = this.readUint32(0);
+
+      if (signature === CENTRAL_DIR_HEADER || signature !== LOCAL_FILE_HEADER) {
+        break;
+      }
+
+      if (!(await this.ensureBytes(30))) break;
+
+      const compressionMethod = this.readUint16(8);
+      const compressedSize = this.readUint32(18);
+      const fileNameLength = this.readUint16(26);
+      const extraFieldLength = this.readUint16(28);
+
+      if (!(await this.ensureBytes(30 + fileNameLength))) break;
+
+      const fileName = new TextDecoder().decode(
+        this.buffer.slice(30, 30 + fileNameLength),
+      );
+
+      const headerSize = 30 + fileNameLength + extraFieldLength;
+
+      if (!(await this.ensureBytes(headerSize))) break;
+
+      this.consume(headerSize);
+
+      const generalPurposeFlag =
+        this.buffer.length >= 6 ? this.readUint16(6 - headerSize) : 0;
+      const hasDataDescriptor = (generalPurposeFlag & 0x08) !== 0;
+
+      if (fileName.endsWith("/")) {
+        yield {
+          fileName,
+          getData: async () => null,
+        };
+        continue;
+      }
+
+      const currentCompressedSize = compressedSize;
+
+      yield {
+        fileName,
+        getData: async (): Promise<Uint8Array | null> => {
+          if (currentCompressedSize === 0 && !hasDataDescriptor) {
+            return new Uint8Array(0);
+          }
+
+          if (!(await this.ensureBytes(currentCompressedSize))) {
+            return null;
+          }
+
+          const compressedData = this.consume(currentCompressedSize);
+
+          if (hasDataDescriptor) {
+            if (await this.ensureBytes(4)) {
+              const maybeSignature = this.readUint32(0);
+              if (maybeSignature === 0x08074b50) {
+                await this.ensureBytes(16);
+                this.consume(16);
+              } else {
+                await this.ensureBytes(12);
+                this.consume(12);
+              }
+            }
+          }
+
+          if (compressionMethod === 0) {
+            return compressedData;
+          } else if (compressionMethod === 8) {
+            try {
+              return await inflateRaw(compressedData);
+            } catch {
+              return null;
+            }
+          }
+          return null;
+        },
+      };
+    }
+  }
+
+  async cancel(): Promise<void> {
+    try {
+      await this.reader.cancel();
+    } catch {
+      // Ignore cancellation errors
+    }
+  }
+}
+
 async function inflateRaw(compressedData: Uint8Array): Promise<Uint8Array> {
-  // DecompressionStream with 'deflate-raw' handles raw DEFLATE without zlib headers
   const ds = new DecompressionStream("deflate-raw");
   const writer = ds.writable.getWriter();
   const reader = ds.readable.getReader();
 
-  // Write compressed data and close
   writer.write(compressedData);
   writer.close();
 
-  // Read all decompressed chunks
   const chunks: Uint8Array[] = [];
   let totalLength = 0;
 
@@ -400,7 +713,6 @@ async function inflateRaw(compressedData: Uint8Array): Promise<Uint8Array> {
     totalLength += value.length;
   }
 
-  // Combine chunks into single array
   const result = new Uint8Array(totalLength);
   let offset = 0;
   for (const chunk of chunks) {
@@ -411,7 +723,7 @@ async function inflateRaw(compressedData: Uint8Array): Promise<Uint8Array> {
   return result;
 }
 
-// ==================== ZIP PARSING ====================
+// ==================== FILE FILTERING ====================
 
 function shouldIncludeFile(context: {
   yamlParse?: any;
@@ -435,6 +747,7 @@ function shouldIncludeFile(context: {
   } = context;
   const ext = filePath.split(".").pop()!;
   const lowercaseFilename = filePath.split("/").pop()!.toLowerCase();
+
   if (
     matchFilenames &&
     !matchFilenames.find((name) => name.toLowerCase() === lowercaseFilename)
@@ -443,10 +756,12 @@ function shouldIncludeFile(context: {
   }
   if (includeExt && !includeExt.includes(ext)) return false;
   if (excludeExt && excludeExt.includes(ext)) return false;
+
   const pathAllowed =
     paths && paths.length > 0
       ? paths.some((path) => filePath.startsWith(path))
       : true;
+
   if (yamlParse) {
     const isInYamlFilter: null | undefined = filePath
       .split("/")
@@ -455,16 +770,15 @@ function shouldIncludeFile(context: {
   } else if (!pathAllowed) {
     return false;
   }
+
   if (includeDir && !includeDir.some((d) => filePath.slice(1).startsWith(d)))
     return false;
   if (excludeDir && excludeDir.some((d) => filePath.slice(1).startsWith(d)))
     return false;
+
   return true;
 }
 
-/**
- * Check if data is valid UTF-8 text
- */
 function isValidUtf8(data: Uint8Array): boolean {
   try {
     const decoder = new TextDecoder("utf-8", { fatal: true });
@@ -475,9 +789,6 @@ function isValidUtf8(data: Uint8Array): boolean {
   }
 }
 
-/**
- * Calculate SHA-256 hash of data
- */
 async function calculateHash(data: Uint8Array): Promise<string> {
   const hashBuffer = await crypto.subtle.digest("SHA-256", data);
   return Array.from(new Uint8Array(hashBuffer))
@@ -485,28 +796,77 @@ async function calculateHash(data: Uint8Array): Promise<string> {
     .join("");
 }
 
-async function parseZipStream(
-  stream: ReadableStream,
-  context: {
-    owner: string;
-    repo: string;
-    branch?: string;
-    includeExt?: string[];
-    excludeExt?: string[];
-    yamlFilter?: string;
-    shouldOmitFiles: boolean;
-    paths?: string[];
-    includeDir?: string[];
-    excludeDir?: string[];
-    disableGenignore?: boolean;
-    maxFileSize?: number;
-    matchFilenames?: string[];
-  },
+// ==================== STREAMING ZIP PROCESSOR ====================
+
+interface ProcessedFile {
+  path: string;
+  content: ContentType;
+  tokens: number;
+  lines: number;
+}
+
+interface StreamingParseContext {
+  owner: string;
+  repo: string;
+  branch?: string;
+  includeExt?: string[];
+  excludeExt?: string[];
+  yamlFilter?: string;
+  paths?: string[];
+  includeDir?: string[];
+  excludeDir?: string[];
+  disableGenignore?: boolean;
+  maxFileSize?: number;
+  matchFilenames?: string[];
+  maxTokens: number;
+  shouldAddLineNumbers: boolean;
+}
+
+function addLineNumbers(
+  content: string,
+  shouldAddLineNumbers: boolean,
+): string {
+  if (!shouldAddLineNumbers) return content;
+  const lines = content.split("\n");
+  const totalLines = lines.length;
+  const totalCharacters = String(totalLines).length;
+  return lines
+    .map((line, index) => {
+      const lineNum = index + 1;
+      const spacesNeeded = totalCharacters - String(lineNum).length;
+      return " ".repeat(spacesNeeded) + String(lineNum) + " | " + line;
+    })
+    .join("\n");
+}
+
+function calculateFileTokens(
+  path: string,
+  content: string,
+  shouldAddLineNumbers: boolean,
+): number {
+  const processed = addLineNumbers(content, shouldAddLineNumbers);
+  const fileString = `${path}:\n${"-".repeat(
+    80,
+  )}\n${processed}\n\n\n${"-".repeat(80)}\n`;
+  return Math.ceil(fileString.length / CHARACTERS_PER_TOKEN);
+}
+
+function calculateFileLines(content: string): number {
+  return content.split("\n").length;
+}
+
+async function parseZipStreaming(
+  stream: ReadableStream<Uint8Array>,
+  context: StreamingParseContext,
 ): Promise<{
   status: number;
   result?: { [path: string]: ContentType };
+  allPaths?: string[];
   shaOrBranch?: string;
   message?: string;
+  totalTokens: number;
+  totalLines: number;
+  usedTokens: number;
 }> {
   const {
     owner,
@@ -521,6 +881,8 @@ async function parseZipStream(
     maxFileSize,
     yamlFilter,
     matchFilenames,
+    maxTokens,
+    shouldAddLineNumbers,
   } = context;
 
   let yamlParse: any;
@@ -534,167 +896,430 @@ async function parseZipStream(
       message:
         "Couldn't parse yaml filter. Please ensure to provide valid url-encoded YAML. " +
         e.message,
+      totalTokens: 0,
+      totalLines: 0,
+      usedTokens: 0,
     };
   }
 
-  const fileContents: { [path: string]: ContentType } = {};
-  let genignoreString: string | null = DEFAULT_GENIGNORE;
-  let shaOrBranch = branch || "HEAD";
+  const shaOrBranch = branch || "HEAD";
+  const zipReader = new StreamingZipReader(stream);
 
-  // Read entire stream into buffer
-  const reader = stream.getReader();
-  const chunks: Uint8Array[] = [];
-  while (true) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    chunks.push(value);
-  }
-  const fullBuffer = new Uint8Array(
-    chunks.reduce((acc, chunk) => acc + chunk.length, 0),
-  );
-  let offset = 0;
-  for (const chunk of chunks) {
-    fullBuffer.set(chunk, offset);
-    offset += chunk.length;
-  }
+  const allFiles: Map<string, { data: Uint8Array; isText: boolean }> =
+    new Map();
+  const allPaths: string[] = [];
+  let genignoreContent: string | null = DEFAULT_GENIGNORE;
 
-  let pos = 0;
-  while (pos < fullBuffer.length - 4) {
-    // Look for local file header signature (PK\x03\x04)
-    if (
-      fullBuffer[pos] === 0x50 &&
-      fullBuffer[pos + 1] === 0x4b &&
-      fullBuffer[pos + 2] === 0x03 &&
-      fullBuffer[pos + 3] === 0x04
-    ) {
-      // Parse local file header
-      const compressionMethod =
-        fullBuffer[pos + 8] | (fullBuffer[pos + 9] << 8);
-      const compressedSize =
-        fullBuffer[pos + 18] |
-        (fullBuffer[pos + 19] << 8) |
-        (fullBuffer[pos + 20] << 16) |
-        (fullBuffer[pos + 21] << 24);
-      const uncompressedSize =
-        fullBuffer[pos + 22] |
-        (fullBuffer[pos + 23] << 8) |
-        (fullBuffer[pos + 24] << 16) |
-        (fullBuffer[pos + 25] << 24);
-      const fileNameLength = fullBuffer[pos + 26] | (fullBuffer[pos + 27] << 8);
-      const extraFieldLength =
-        fullBuffer[pos + 28] | (fullBuffer[pos + 29] << 8);
+  try {
+    for await (const entry of zipReader.entries()) {
+      if (entry.fileName.endsWith("/")) continue;
 
-      const fileNameStart = pos + 30;
-      const fileName = new TextDecoder().decode(
-        fullBuffer.slice(fileNameStart, fileNameStart + fileNameLength),
-      );
+      const filePath = entry.fileName.split("/").slice(1).join("/");
+      if (!filePath) continue;
 
-      const dataStart = fileNameStart + fileNameLength + extraFieldLength;
-      const dataEnd = dataStart + compressedSize;
+      allPaths.push(filePath);
 
-      if (!fileName.endsWith("/")) {
-        const filePath = fileName.split("/").slice(1).join("/");
-
-        // Get the raw (possibly compressed) data
-        const rawData = fullBuffer.slice(dataStart, dataEnd);
-
-        // Decompress if needed
-        let fileData: Uint8Array;
-        try {
-          if (compressionMethod === 0) {
-            // Stored (no compression)
-            fileData = rawData;
-          } else if (compressionMethod === 8) {
-            // DEFLATE compression
-            fileData = await inflateRaw(rawData);
-          } else {
-            // Unsupported compression method - skip this file
-            console.warn(
-              `Unsupported compression method ${compressionMethod} for ${filePath}`,
-            );
-            pos = dataEnd;
-            continue;
-          }
-        } catch (e) {
-          // Decompression failed - skip this file
-          console.warn(`Failed to decompress ${filePath}:`, e);
-          pos = dataEnd;
-          continue;
+      if (filePath === ".genignore" && !disableGenignore) {
+        const data = await entry.getData();
+        if (data && isValidUtf8(data)) {
+          genignoreContent = new TextDecoder("utf-8").decode(data);
         }
-
-        // Handle .genignore file
-        if (filePath === ".genignore" && !disableGenignore) {
-          try {
-            genignoreString = new TextDecoder("utf-8", { fatal: true }).decode(
-              fileData,
-            );
-          } catch {
-            // If .genignore isn't valid UTF-8, use default
-          }
-        }
-
-        if (
-          shouldIncludeFile({
-            matchFilenames,
-            filePath,
-            yamlParse,
-            includeExt,
-            excludeExt,
-            includeDir,
-            excludeDir,
-            paths,
-          })
-        ) {
-          // Check if it's valid UTF-8 text
-          const isText = isValidUtf8(fileData);
-
-          // Apply max file size filter only to text files
-          if (isText && maxFileSize && fileData.length > maxFileSize) {
-            pos = dataEnd;
-            continue;
-          }
-
-          const hash = await calculateHash(fileData);
-
-          if (isText) {
-            const content = new TextDecoder("utf-8").decode(fileData);
-            fileContents[filePath] = {
-              type: "content",
-              content,
-              hash,
-              size: fileData.length,
-              url: undefined,
-            };
-          } else {
-            fileContents[filePath] = {
-              type: "binary",
-              content: undefined,
-              hash,
-              size: fileData.length,
-              url: `https://raw.githubusercontent.com/${owner}/${repo}/${shaOrBranch}/${filePath}`,
-            };
-          }
-        }
+        continue;
       }
 
-      pos = dataEnd;
-    } else {
-      pos++;
+      if (
+        !shouldIncludeFile({
+          matchFilenames,
+          filePath,
+          yamlParse,
+          includeExt,
+          excludeExt,
+          includeDir,
+          excludeDir,
+          paths,
+        })
+      ) {
+        await entry.getData();
+        continue;
+      }
+
+      const data = await entry.getData();
+      if (!data) continue;
+
+      const isText = isValidUtf8(data);
+
+      if (isText && maxFileSize && data.length > maxFileSize) {
+        continue;
+      }
+
+      allFiles.set(filePath, { data, isText });
     }
+  } catch (e) {
+    // Stream might have ended early, continue with what we have
   }
 
   const genignore =
-    genignoreString && !disableGenignore
-      ? compileGitignore(genignoreString)
+    genignoreContent && !disableGenignore
+      ? compileGitignore(genignoreContent)
       : undefined;
-  const unignoredFilePaths = Object.keys(fileContents).filter((p) =>
-    genignore ? genignore.accepts(p) : true,
-  );
-  const final: { [path: string]: ContentType } = {};
-  unignoredFilePaths.forEach((p) => {
-    final["/" + p] = fileContents[p];
-  });
-  return { status: 200, result: final, shaOrBranch };
+
+  const processedFiles: ProcessedFile[] = [];
+  let totalTokens = 0;
+  let totalLines = 0;
+
+  for (const [filePath, { data, isText }] of allFiles) {
+    if (genignore && !genignore.accepts(filePath)) {
+      continue;
+    }
+
+    const hash = await calculateHash(data);
+
+    if (isText) {
+      const content = new TextDecoder("utf-8").decode(data);
+      const tokens = calculateFileTokens(
+        "/" + filePath,
+        content,
+        shouldAddLineNumbers,
+      );
+      const lines = calculateFileLines(content);
+
+      processedFiles.push({
+        path: "/" + filePath,
+        content: {
+          type: "content",
+          content,
+          hash,
+          size: data.length,
+          url: undefined,
+        },
+        tokens,
+        lines,
+      });
+
+      totalTokens += tokens;
+      totalLines += lines;
+    } else {
+      const tokens = Math.ceil(
+        (
+          `/${filePath}:\n` +
+          "-".repeat(80) +
+          `\nhttps://raw.githubusercontent.com/${owner}/${repo}/${shaOrBranch}/${filePath}\n\n\n` +
+          "-".repeat(80) +
+          "\n"
+        ).length / CHARACTERS_PER_TOKEN,
+      );
+
+      processedFiles.push({
+        path: "/" + filePath,
+        content: {
+          type: "binary",
+          content: undefined,
+          hash,
+          size: data.length,
+          url: `https://raw.githubusercontent.com/${owner}/${repo}/${shaOrBranch}/${filePath}`,
+        },
+        tokens,
+        lines: 1,
+      });
+
+      totalTokens += tokens;
+      totalLines += 1;
+    }
+  }
+
+  processedFiles.sort((a, b) => a.tokens - b.tokens);
+
+  const result: { [path: string]: ContentType } = {};
+  let usedTokens = 0;
+
+  for (const file of processedFiles) {
+    if (usedTokens + file.tokens <= maxTokens) {
+      result[file.path] = file.content;
+      usedTokens += file.tokens;
+    }
+  }
+
+  return {
+    status: 200,
+    result,
+    allPaths,
+    shaOrBranch,
+    totalTokens,
+    totalLines,
+    usedTokens,
+  };
+}
+
+// ==================== MODAL HTML GENERATION ====================
+
+type ModalState =
+  | "login_required"
+  | "private_access_required"
+  | "credit_required"
+  | null;
+
+function generateModalHTML(
+  state: ModalState,
+  context: {
+    loginUrl: string;
+    privateAccessUrl: string;
+    paymentLink: string;
+    credit: number;
+    username?: string;
+    profilePicture?: string;
+  },
+): string {
+  if (!state) return "";
+
+  const {
+    loginUrl,
+    privateAccessUrl,
+    paymentLink,
+    credit,
+    username,
+    profilePicture,
+  } = context;
+
+  const modalStyles = `
+    .modal-overlay {
+      position: fixed;
+      top: 0;
+      left: 0;
+      right: 0;
+      bottom: 0;
+      background: rgba(0, 0, 0, 0.85);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      z-index: 10000;
+    }
+    .modal-content {
+      background: linear-gradient(145deg, #1e1e2e 0%, #2a2a3e 100%);
+      border-radius: 16px;
+      padding: 40px;
+      max-width: 450px;
+      width: 90%;
+      text-align: center;
+      box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.5);
+      border: 1px solid rgba(255, 255, 255, 0.1);
+    }
+    .modal-icon {
+      font-size: 48px;
+      margin-bottom: 20px;
+    }
+    .modal-title {
+      font-size: 24px;
+      font-weight: 700;
+      margin-bottom: 12px;
+      background: linear-gradient(135deg, #8b5cf6 0%, #ec4899 100%);
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+    }
+    .modal-description {
+      color: rgba(255, 255, 255, 0.7);
+      margin-bottom: 24px;
+      line-height: 1.6;
+    }
+    .modal-button {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 10px;
+      padding: 14px 28px;
+      background: linear-gradient(135deg, #8b5cf6 0%, #ec4899 100%);
+      color: white;
+      text-decoration: none;
+      border-radius: 12px;
+      font-weight: 600;
+      font-size: 16px;
+      transition: all 0.3s ease;
+      border: none;
+      cursor: pointer;
+      width: 100%;
+      box-sizing: border-box;
+    }
+    .modal-button:hover {
+      transform: translateY(-2px);
+      box-shadow: 0 10px 30px rgba(139, 92, 246, 0.4);
+    }
+    .modal-button-secondary {
+      background: rgba(255, 255, 255, 0.1);
+      margin-top: 12px;
+    }
+    .modal-button-secondary:hover {
+      background: rgba(255, 255, 255, 0.15);
+      box-shadow: none;
+    }
+    .modal-steps {
+      display: flex;
+      flex-direction: column;
+      gap: 16px;
+      margin-bottom: 24px;
+    }
+    .modal-step {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      padding: 12px;
+      background: rgba(255, 255, 255, 0.05);
+      border-radius: 8px;
+      text-align: left;
+    }
+    .modal-step-number {
+      width: 28px;
+      height: 28px;
+      border-radius: 50%;
+      background: linear-gradient(135deg, #8b5cf6 0%, #ec4899 100%);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-weight: 600;
+      font-size: 14px;
+      flex-shrink: 0;
+    }
+    .modal-step-completed {
+      background: #22c55e;
+    }
+    .modal-step-text {
+      color: rgba(255, 255, 255, 0.9);
+      font-size: 14px;
+    }
+    .modal-credit {
+      background: rgba(255, 255, 255, 0.05);
+      padding: 16px;
+      border-radius: 8px;
+      margin-bottom: 20px;
+    }
+    .modal-credit-label {
+      font-size: 12px;
+      color: rgba(255, 255, 255, 0.5);
+      text-transform: uppercase;
+      letter-spacing: 1px;
+    }
+    .modal-credit-value {
+      font-size: 32px;
+      font-weight: 700;
+      color: ${credit >= PRIVATE_REPO_COST_CENTS ? "#22c55e" : "#ef4444"};
+    }
+    .modal-user {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      padding: 12px;
+      background: rgba(255, 255, 255, 0.05);
+      border-radius: 8px;
+      margin-bottom: 20px;
+    }
+    .modal-user-avatar {
+      width: 40px;
+      height: 40px;
+      border-radius: 50%;
+    }
+    .modal-user-name {
+      font-weight: 600;
+      color: rgba(255, 255, 255, 0.9);
+    }
+  `;
+
+  let modalContent = "";
+
+  if (state === "login_required") {
+    modalContent = `
+      <div class="modal-icon">🔐</div>
+      <h2 class="modal-title">Sign in to Continue</h2>
+      <p class="modal-description">
+        Sign in with GitHub to access uithub and view repository contents optimized for LLMs.
+      </p>
+      <a href="${loginUrl}" class="modal-button">
+        <svg width="20" height="20" viewBox="0 0 16 16" fill="currentColor">
+          <path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/>
+        </svg>
+        Sign in with GitHub
+      </a>
+    `;
+  } else if (state === "private_access_required") {
+    modalContent = `
+      <div class="modal-icon">🔒</div>
+      <h2 class="modal-title">Private Repository Access</h2>
+      ${
+        username && profilePicture
+          ? `
+        <div class="modal-user">
+          <img src="${profilePicture}" alt="${username}" class="modal-user-avatar">
+          <span class="modal-user-name">@${username}</span>
+        </div>
+      `
+          : ""
+      }
+      <p class="modal-description">
+        This is a private repository. You need to grant additional GitHub permissions to access it.
+      </p>
+      <div class="modal-steps">
+        <div class="modal-step">
+          <div class="modal-step-number modal-step-completed">✓</div>
+          <span class="modal-step-text">Signed in to uithub</span>
+        </div>
+        <div class="modal-step">
+          <div class="modal-step-number">2</div>
+          <span class="modal-step-text">Grant private repository access</span>
+        </div>
+      </div>
+      <a href="${privateAccessUrl}" class="modal-button">
+        Grant Private Repo Access
+      </a>
+    `;
+  } else if (state === "credit_required") {
+    modalContent = `
+      <div class="modal-icon">💳</div>
+      <h2 class="modal-title">Add Credit to Continue</h2>
+      ${
+        username && profilePicture
+          ? `
+        <div class="modal-user">
+          <img src="${profilePicture}" alt="${username}" class="modal-user-avatar">
+          <span class="modal-user-name">@${username}</span>
+        </div>
+      `
+          : ""
+      }
+      <div class="modal-credit">
+        <div class="modal-credit-label">Current Balance</div>
+        <div class="modal-credit-value">$${(credit / 100).toFixed(2)}</div>
+      </div>
+      <p class="modal-description">
+        Private repository access costs $0.01 per request. Add credit to your account to continue.
+      </p>
+      <div class="modal-steps">
+        <div class="modal-step">
+          <div class="modal-step-number modal-step-completed">✓</div>
+          <span class="modal-step-text">Signed in to uithub</span>
+        </div>
+        <div class="modal-step">
+          <div class="modal-step-number modal-step-completed">✓</div>
+          <span class="modal-step-text">Private repository access granted</span>
+        </div>
+        <div class="modal-step">
+          <div class="modal-step-number">3</div>
+          <span class="modal-step-text">Add credit ($0.01 minimum)</span>
+        </div>
+      </div>
+      <a href="${paymentLink}" class="modal-button" target="_blank">
+        Add Credit via Stripe
+      </a>
+      <button onclick="window.location.reload()" class="modal-button modal-button-secondary">
+        I've Added Credit - Refresh
+      </button>
+    `;
+  }
+
+  return `
+    <style>${modalStyles}</style>
+    <div class="modal-overlay">
+      <div class="modal-content">
+        ${modalContent}
+      </div>
+    </div>
+  `;
 }
 
 // ==================== HTML GENERATION ====================
@@ -709,27 +1334,40 @@ function generateViewHTML(context: {
   title: string;
   description: string;
   default_branch?: string;
+  modalState: ModalState;
+  modalContext: {
+    loginUrl: string;
+    privateAccessUrl: string;
+    paymentLink: string;
+    credit: number;
+    username?: string;
+    profilePicture?: string;
+  };
 }): string {
   const {
     description,
     fileString,
     title,
     tokens,
-    totalLines,
     totalTokens,
+    totalLines,
     tree,
     url,
     default_branch,
+    modalState,
+    modalContext,
   } = context;
   const [_, owner, repo, page, branch, ...pathParts] = url.pathname.split("/");
-  const path = pathParts.join("/");
 
-  // Build the current page URL for LLM links
   const currentPageUrl = encodeURIComponent(
     url.origin + url.pathname + url.search,
   );
   const chatgptUrl = `https://chatgpt.com/?hints=search&prompt=Read+from+${currentPageUrl}+so+I+can+ask+questions+about+it.`;
   const claudeUrl = `https://claude.ai/new?q=Read%20from%20${currentPageUrl}%20so%20I%20can%20ask%20questions%20about%20it.`;
+
+  const contentBlurStyle = modalState
+    ? "pointer-events: none; user-select: none;"
+    : "";
 
   return `<!DOCTYPE html>
 <html lang="en">
@@ -778,6 +1416,7 @@ function generateViewHTML(context: {
       left: 0;
       right: 0;
       z-index: 1000;
+      ${contentBlurStyle}
     }
     button, select, input {
       background-color: var(--button-bg);
@@ -799,11 +1438,7 @@ function generateViewHTML(context: {
       gap: 10px;
       align-items: center;
     }
-    
-    /* Copy Menu Button Styles */
-    .copy-menu-container {
-      position: relative;
-    }
+    .copy-menu-container { position: relative; }
     .copy-button {
       background: rgba(255, 255, 255, 0.05);
       border: 1px solid rgba(255, 255, 255, 0.1);
@@ -823,27 +1458,10 @@ function generateViewHTML(context: {
       background: rgba(255, 255, 255, 0.08);
       border-color: rgba(255, 255, 255, 0.2);
     }
-    .button-left {
-      display: flex;
-      align-items: center;
-      gap: 8px;
-      flex: 1;
-    }
-    .icon {
-      width: 16px;
-      height: 16px;
-      stroke: currentColor;
-      fill: none;
-      stroke-width: 2;
-    }
-    .arrow-icon {
-      width: 14px;
-      height: 14px;
-      transition: transform 0.3s;
-    }
-    .arrow-icon.rotated {
-      transform: rotate(180deg);
-    }
+    .button-left { display: flex; align-items: center; gap: 8px; flex: 1; }
+    .icon { width: 16px; height: 16px; stroke: currentColor; fill: none; stroke-width: 2; }
+    .arrow-icon { width: 14px; height: 14px; transition: transform 0.3s; }
+    .arrow-icon.rotated { transform: rotate(180deg); }
     .menu {
       position: absolute;
       top: calc(100% + 8px);
@@ -860,11 +1478,7 @@ function generateViewHTML(context: {
       min-width: 350px;
       z-index: 1001;
     }
-    .menu.open {
-      opacity: 1;
-      visibility: visible;
-      transform: translateY(0);
-    }
+    .menu.open { opacity: 1; visibility: visible; transform: translateY(0); }
     .menu-item {
       padding: 16px 20px;
       display: flex;
@@ -876,12 +1490,8 @@ function generateViewHTML(context: {
       transition: background 0.2s;
       border-bottom: 1px solid rgba(255, 255, 255, 0.05);
     }
-    .menu-item:last-child {
-      border-bottom: none;
-    }
-    .menu-item:hover {
-      background: rgba(255, 255, 255, 0.05);
-    }
+    .menu-item:last-child { border-bottom: none; }
+    .menu-item:hover { background: rgba(255, 255, 255, 0.05); }
     .menu-icon {
       width: 40px;
       height: 40px;
@@ -892,42 +1502,23 @@ function generateViewHTML(context: {
       justify-content: center;
       flex-shrink: 0;
     }
-    .menu-icon img {
-      width: 24px;
-      height: 24px;
-      border-radius: 4px;
-    }
-    .menu-content {
-      flex: 1;
-    }
-    .menu-title {
-      font-size: 16px;
-      font-weight: 500;
-      margin-bottom: 4px;
-      display: flex;
-      align-items: center;
-      gap: 8px;
-    }
-    .menu-description {
-      font-size: 14px;
-      color: rgba(255, 255, 255, 0.6);
-    }
-    .external-icon {
-      width: 14px;
-      height: 14px;
-      opacity: 0.6;
-    }
-    textarea {
-      position: absolute;
-      left: -9999px;
+    .menu-icon img { width: 24px; height: 24px; border-radius: 4px; }
+    .menu-content { flex: 1; }
+    .menu-title { font-size: 16px; font-weight: 500; margin-bottom: 4px; display: flex; align-items: center; gap: 8px; }
+    .menu-description { font-size: 14px; color: rgba(255, 255, 255, 0.6); }
+    .external-icon { width: 14px; height: 14px; opacity: 0.6; }
+    textarea { position: absolute; left: -9999px; }
+    .content-container {
+      ${contentBlurStyle}
     }
   </style>
 </head>
 <body>
+  ${generateModalHTML(modalState, modalContext)}
   <header>
     <div id="filterContainer">
       <select id="formatSelect" onchange="updateFilters()">
-        <option value="text/html">Format: HTML</option>
+        <option value="">Format: HTML</option>
         <option value="application/json">Format: JSON</option>
         <option value="text/yaml">Format: YAML</option>
         <option value="text/plain">Format: Text</option>
@@ -1047,7 +1638,7 @@ function generateViewHTML(context: {
       </a>
     </div>
   </header>
-  <div style="max-width: 100vw; margin-top:35px;">
+  <div class="content-container" style="max-width: 100vw; margin-top:35px;">
     <pre id="textToCopy">${escapeHTML(fileString)}</pre>
   </div>
   
@@ -1061,7 +1652,6 @@ function generateViewHTML(context: {
     })};
     const tree = ${JSON.stringify(tree)};
     
-    // Copy Menu Functionality
     const mainButton = document.getElementById('mainButton');
     const copyPart = document.getElementById('copyPart');
     const arrowIcon = document.getElementById('arrowIcon');
@@ -1075,7 +1665,6 @@ function generateViewHTML(context: {
     mainButton.addEventListener('click', (e) => {
       const rect = arrowIcon.getBoundingClientRect();
       const clickX = e.clientX;
-      
       if (clickX > rect.left - 30) {
         toggleMenu();
       } else {
@@ -1097,13 +1686,9 @@ function generateViewHTML(context: {
     function copyToClipboard() {
       copyContent.select();
       document.execCommand('copy');
-      
       const originalText = buttonText.textContent;
       buttonText.textContent = 'Copied';
-      
-      setTimeout(() => {
-        buttonText.textContent = originalText;
-      }, 1000);
+      setTimeout(() => { buttonText.textContent = originalText; }, 1000);
     }
     
     copyMarkdown.addEventListener('click', () => {
@@ -1124,17 +1709,25 @@ function generateViewHTML(context: {
       const maxTokens = document.getElementById('maxTokensInput').value;
       const ext = document.getElementById('extSelect').value;
       let url = new URL(window.location.href);
-      url.searchParams.set('accept', format);
+      
+      if (format) {
+        url.searchParams.set('accept', format);
+      } else {
+        url.searchParams.delete('accept');
+      }
+      
       if (maxTokens) {
         url.searchParams.set('maxTokens', maxTokens);
       } else {
-        url.searchParams.set('maxTokens', 10000000);
+        url.searchParams.delete('maxTokens');
       }
+      
       if (ext) {
         url.searchParams.set('ext', ext);
       } else {
         url.searchParams.delete('ext');
       }
+      
       window.location.href = url.toString();
     }
     
@@ -1193,7 +1786,7 @@ function generateViewHTML(context: {
     
     function initializeFromURL() {
       const url = new URL(window.location.href);
-      const format = url.searchParams.get('accept') || "text/html";
+      const format = url.searchParams.get('accept') || "";
       document.getElementById('formatSelect').value = format;
       document.getElementById('maxTokensInput').value = url.searchParams.get('maxTokens') || '50000';
       document.getElementById('extSelect').value = url.searchParams.get('ext') || '';
@@ -1264,38 +1857,13 @@ function generateProfileHTML(owner: string, repos: any[]): string {
 </html>`;
 }
 
-// ==================== LINE NUMBER HELPER ====================
-
-function withLeadingSpace(lineNumber: number, totalLines: number): string {
-  const totalCharacters = String(totalLines).length;
-  const spacesNeeded = totalCharacters - String(lineNumber).length;
-  return " ".repeat(spacesNeeded) + String(lineNumber);
-}
-
-function addLineNumbers(
-  content: string,
-  shouldAddLineNumbers: boolean,
-): string {
-  if (!shouldAddLineNumbers) return content;
-  const lines = content.split("\n");
-  return lines
-    .map(
-      (line, index) => `${withLeadingSpace(index + 1, lines.length)} | ${line}`,
-    )
-    .join("\n");
-}
-
 // ==================== CHECK REPO ACCESS ====================
 
 async function checkRepoAccess(
   owner: string,
   repo: string,
   token?: string | null,
-): Promise<{
-  exists: boolean;
-  isPrivate: boolean;
-  default_branch?: string;
-}> {
+): Promise<{ exists: boolean; isPrivate: boolean; default_branch?: string }> {
   const headers: HeadersInit = {
     Accept: "application/vnd.github.v3+json",
     "User-Agent": "uithub",
@@ -1337,13 +1905,17 @@ export default {
       return handleLogout(request);
     }
 
+    // Handle Stripe webhook
+    if (url.pathname === "/webhook/stripe" && request.method === "POST") {
+      return handleStripeWebhook(request, env);
+    }
+
     const [_, owner, repo, page, branch, ...pathParts] =
       url.pathname.split("/");
     const path = pathParts.join("/");
     const apiKey = getAccessToken(request);
-    if (apiKey) {
-      console.log({ apiKey, owner, repo, page, branch, pathParts });
-    }
+    const currentUser = getCurrentUser(request);
+    const sessionScopes = getSessionScopes(request);
 
     // Root - show index.html
     if (!owner) {
@@ -1401,106 +1973,109 @@ export default {
     try {
       const repoAccess = await checkRepoAccess(owner, repo, apiKey);
 
-      // If repo doesn't exist or is private and we don't have token, require login
-      if (!repoAccess.exists) {
-        if (!apiKey) {
-          const loginUrl = `${
-            url.origin
-          }/login?scope=repo&redirect_to=${encodeURIComponent(
-            url.pathname + url.search,
-          )}`;
-          if (request.headers.get("Accept")?.includes("text/html")) {
-            return new Response(
-              `<!DOCTYPE html>
-<html>
-<head>
-  <title>Login Required</title>
-  <style>
-    body { font-family: system-ui; background: #1a1a1a; color: #f0f0f0; display: flex; align-items: center; justify-content: center; height: 100vh; margin: 0; }
-    .container { text-align: center; max-width: 500px; padding: 40px; background: #2a2a2a; border-radius: 12px; }
-    h1 { color: #8b5cf6; margin-bottom: 20px; }
-    p { margin-bottom: 30px; opacity: 0.9; }
-    a { display: inline-block; padding: 12px 24px; background: linear-gradient(135deg, #8b5cf6 0%, #ec4899 100%); color: white; text-decoration: none; border-radius: 8px; font-weight: bold; }
-    a:hover { transform: translateY(-2px); box-shadow: 0 4px 12px rgba(139, 92, 246, 0.4); }
-  </style>
-</head>
-<body>
-  <div class="container">
-    <h1>🔒 Private Repository</h1>
-    <p>This repository is private or doesn't exist. Please login with GitHub to access it.</p>
-    <a href="${loginUrl}">Login with GitHub</a>
-  </div>
-</body>
-</html>`,
-              {
-                status: 401,
-                headers: { "Content-Type": "text/html;charset=utf8" },
-              },
-            );
-          }
-          return new Response(
-            "Repository not found or private. Authentication required.",
-            { status: 401 },
-          );
-        }
-        return new Response("Repository not found", { status: 404 });
+      // Prepare modal context
+      const loginUrl = `${
+        url.origin
+      }/login?scope=user:email&redirect_to=${encodeURIComponent(
+        url.pathname + url.search,
+      )}`;
+      const privateAccessUrl = `${
+        url.origin
+      }/login?scope=repo&redirect_to=${encodeURIComponent(
+        url.pathname + url.search,
+      )}`;
+
+      let userAccount: UserAccount | null = null;
+      if (currentUser) {
+        userAccount = await getUserAccount(String(currentUser.id), env);
       }
 
-      // If repo is private but we only have public scope, require private scope login
-      if (repoAccess.isPrivate && apiKey) {
-        const user = getCurrentUser(request);
-        if (user) {
-          const scopeResponse = await fetch("https://api.github.com/user", {
-            headers: {
-              Authorization: `token ${apiKey}`,
-              Accept: "application/vnd.github.v3+json",
-              "User-Agent": "uithub",
-            },
-          });
-          const scopes = scopeResponse.headers.get("X-OAuth-Scopes") || "";
-          if (!scopes.includes("repo")) {
-            const loginUrl = `${
-              url.origin
-            }/login?scope=repo&redirect_to=${encodeURIComponent(
-              url.pathname + url.search,
-            )}`;
-            if (request.headers.get("Accept")?.includes("text/html")) {
-              return new Response(
-                `<!DOCTYPE html>
-<html>
-<head>
-  <title>Additional Permission Required</title>
-  <style>
-    body { font-family: system-ui; background: #1a1a1a; color: #f0f0f0; display: flex; align-items: center; justify-content: center; height: 100vh; margin: 0; }
-    .container { text-align: center; max-width: 500px; padding: 40px; background: #2a2a2a; border-radius: 12px; }
-    h1 { color: #8b5cf6; margin-bottom: 20px; }
-    p { margin-bottom: 30px; opacity: 0.9; }
-    a { display: inline-block; padding: 12px 24px; background: linear-gradient(135deg, #8b5cf6 0%, #ec4899 100%); color: white; text-decoration: none; border-radius: 8px; font-weight: bold; }
-    a:hover { transform: translateY(-2px); box-shadow: 0 4px 12px rgba(139, 92, 246, 0.4); }
-  </style>
-</head>
-<body>
-  <div class="container">
-    <h1>🔒 Private Repository Access</h1>
-    <p>This repository requires private repository access. Please re-authenticate with the necessary permissions.</p>
-    <a href="${loginUrl}">Grant Access</a>
-  </div>
-</body>
-</html>`,
-                { status: 403, headers: { "Content-Type": "text/html" } },
-              );
-            }
+      const paymentLink = currentUser
+        ? `${env.STRIPE_PAYMENT_LINK}?client_reference_id=${currentUser.id}`
+        : env.STRIPE_PAYMENT_LINK;
+
+      const modalContext = {
+        loginUrl,
+        privateAccessUrl,
+        paymentLink,
+        credit: userAccount?.credit || 0,
+        username: currentUser?.login,
+        profilePicture: currentUser?.avatar_url,
+      };
+
+      // Determine modal state
+      let modalState: ModalState = null;
+
+      // Parse query params
+      const accept =
+        url.searchParams.get("accept") || request.headers.get("Accept") || "";
+      const needHtml =
+        accept?.includes("text/html") ||
+        (!accept && !url.searchParams.get("accept"));
+
+      // For HTML responses, check if user is logged in
+      if (needHtml && !currentUser) {
+        // Show login modal for public repos
+        if (repoAccess.exists && !repoAccess.isPrivate) {
+          modalState = "login_required";
+        }
+      }
+
+      // Handle private repos
+      if (!repoAccess.exists || repoAccess.isPrivate) {
+        if (!currentUser) {
+          // Not logged in at all
+          if (needHtml) {
+            modalState = "login_required";
+          } else {
+            return new Response(
+              "Repository not found or private. Authentication required.",
+              { status: 401 },
+            );
+          }
+        } else if (!sessionScopes.includes("repo")) {
+          // Logged in but no private repo scope
+          if (needHtml) {
+            modalState = "private_access_required";
+          } else {
             return new Response("Private repository access required", {
               status: 403,
             });
           }
+        } else if (
+          !userAccount ||
+          userAccount.credit < PRIVATE_REPO_COST_CENTS
+        ) {
+          // Has scope but insufficient credit
+          if (needHtml) {
+            modalState = "credit_required";
+          } else {
+            return new Response(
+              `Insufficient credit. Balance: $${(
+                (userAccount?.credit || 0) / 100
+              ).toFixed(2)}. Required: $0.01`,
+              { status: 402 },
+            );
+          }
+        } else {
+          // All good - charge for private repo access
+          const chargeResult = await chargeForPrivateRepo(
+            String(currentUser.id),
+            env,
+          );
+          if (!chargeResult.success) {
+            if (needHtml) {
+              modalState = "credit_required";
+            } else {
+              return new Response(chargeResult.message, { status: 402 });
+            }
+          }
         }
       }
 
+      // If we have a modal state and need HTML, we still process but show with modal
       // Parse query params
       const maxTokensParam = url.searchParams.get("maxTokens");
-      const accept =
-        url.searchParams.get("accept") || request.headers.get("Accept") || "";
       const shouldAddLineNumbers = url.searchParams.get("lines") !== "false";
       const includeExt = url.searchParams.get("ext")?.split(",");
       const includeDir = url.searchParams.get("dir")?.split(",");
@@ -1522,18 +2097,50 @@ export default {
       const isJson = accept === "application/json";
       const isYaml = accept === "text/yaml";
       const needStringOrHtml = !isJson && !isYaml;
-      const needHtml = accept?.includes("text/html");
 
-      const realMaxTokens =
+      // Default to 50k tokens
+      const maxTokens =
         maxTokensParam && !isNaN(Number(maxTokensParam))
           ? Number(maxTokensParam)
-          : needStringOrHtml
-          ? DEFAULT_MAX_TOKENS
-          : undefined;
+          : DEFAULT_MAX_TOKENS;
+
+      // If modal is shown, return with blurred content (empty placeholder)
+      if (modalState && needHtml) {
+        const placeholderFileString =
+          "Content hidden. Please complete the required steps above.";
+        const placeholderTree = {};
+
+        const branchPart = branch ? ` at ${branch}` : "";
+        const title = `${owner}/${repo} - uithub`;
+        const description = `LLM context for ${repo}. /${path}${branchPart}`;
+
+        const viewHtml = generateViewHTML({
+          url,
+          title,
+          description,
+          fileString: placeholderFileString,
+          tokens: 0,
+          totalTokens: 0,
+          totalLines: 0,
+          tree: placeholderTree,
+          default_branch: repoAccess.default_branch,
+          modalState,
+          modalContext,
+        });
+
+        return new Response(viewHtml, {
+          headers: {
+            "Content-Type": "text/html",
+            "X-XSS-Protection": "1; mode=block",
+            "X-Content-Type-Options": "nosniff",
+            "X-Frame-Options": "DENY",
+          },
+        });
+      }
 
       // Fetch from GitHub
       const ref = branch && branch !== "" ? branch : "HEAD";
-      const isPrivate = !!apiKey;
+      const isPrivate = !!apiKey && repoAccess.isPrivate;
       const branchSuffix = branch && branch !== "" ? `/${branch}` : "";
       const apiUrl = isPrivate
         ? `https://api.github.com/repos/${owner}/${repo}/zipball${branchSuffix}`
@@ -1542,9 +2149,6 @@ export default {
         ? { Authorization: `token ${apiKey}` }
         : {};
       headers["User-Agent"] = "uithub";
-      if (apiKey) {
-        console.log({ apiUrl, headers });
-      }
 
       const response = await fetch(apiUrl, { headers });
       if (!response.ok || !response.body) {
@@ -1553,8 +2157,8 @@ export default {
         });
       }
 
-      // Parse ZIP
-      const result = await parseZipStream(response.body, {
+      // Stream-parse ZIP with token limit
+      const result = await parseZipStreaming(response.body, {
         owner,
         repo,
         branch,
@@ -1565,9 +2169,10 @@ export default {
         yamlFilter,
         matchFilenames,
         paths: path ? [path] : undefined,
-        shouldOmitFiles,
         disableGenignore,
         maxFileSize,
+        maxTokens,
+        shouldAddLineNumbers,
       });
 
       if (!result.result) {
@@ -1576,7 +2181,7 @@ export default {
         });
       }
 
-      // Build tree and content
+      // Build tree from all paths for navigation, but only include selected files in output
       const tree = filePathToNestedObject({ ...result.result }, () => null);
       const treeString = nestedObjectToTreeString(tree);
       const treeTokens = Math.round(treeString.length / CHARACTERS_PER_TOKEN);
@@ -1593,75 +2198,6 @@ export default {
           80,
         )}\n`;
       };
-
-      const getPathTokenSize = (path: string) =>
-        Math.ceil(stringifyFileContent(path).length / CHARACTERS_PER_TOKEN);
-
-      const getPathLineSize = (path: string) => {
-        const item = result.result![path];
-        const contentOrUrl =
-          item.type === "content"
-            ? item.content
-            : item.type === "binary"
-            ? item.url
-            : "";
-        return Math.ceil(
-          `-----------------------\n${path}:\n-----------------------\n\n${contentOrUrl}`.split(
-            "\n",
-          ).length,
-        );
-      };
-
-      let totalTokens: number;
-      let totalLines: number;
-
-      // Apply token limit
-      if (realMaxTokens) {
-        const pathsBySize = Object.keys(result.result).sort(
-          (a, b) => getPathTokenSize(a) - getPathTokenSize(b),
-        );
-
-        const { lastIndexThatFits, total, lines } = pathsBySize.reduce(
-          (previous, current, currentIndex) => {
-            const currentTokens = getPathTokenSize(current);
-            const currentLines = getPathLineSize(current);
-            const newLines = previous.lines + currentLines;
-            const newTotal = previous.total + currentTokens;
-            if (newTotal > realMaxTokens) {
-              return {
-                lines: newLines,
-                total: newTotal,
-                lastIndexThatFits: previous.lastIndexThatFits,
-              };
-            }
-            return {
-              total: newTotal,
-              lines: newLines,
-              lastIndexThatFits: currentIndex,
-            };
-          },
-          { total: 0, lines: 0, lastIndexThatFits: -1 },
-        );
-
-        totalTokens = total + treeTokens;
-        totalLines = lines;
-
-        const pathsToRemove =
-          lastIndexThatFits === -1
-            ? []
-            : pathsBySize.slice(lastIndexThatFits + 1);
-        pathsToRemove.forEach((p) => {
-          delete result.result![p];
-        });
-      } else {
-        totalTokens =
-          Object.keys(result.result)
-            .map(getPathTokenSize)
-            .reduce((sum, tokens) => sum + tokens, 0) + treeTokens;
-        totalLines = Object.keys(result.result)
-          .map(getPathLineSize)
-          .reduce((sum, lines) => sum + lines, 0);
-      }
 
       const filePart = Object.keys(result.result)
         .map(stringifyFileContent)
@@ -1684,10 +2220,12 @@ export default {
           description,
           fileString,
           tokens,
-          totalTokens,
-          totalLines,
+          totalTokens: result.totalTokens + treeTokens,
+          totalLines: result.totalLines,
           tree,
           default_branch: result.shaOrBranch || repoAccess.default_branch,
+          modalState: null,
+          modalContext,
         });
 
         return new Response(viewHtml, {
@@ -1711,9 +2249,9 @@ export default {
       const body = {
         size: {
           tokens,
-          totalTokens,
-          characters: totalTokens * CHARACTERS_PER_TOKEN,
-          lines: totalLines,
+          totalTokens: result.totalTokens + treeTokens,
+          characters: (result.totalTokens + treeTokens) * CHARACTERS_PER_TOKEN,
+          lines: result.totalLines,
         },
         tree: shouldOmitTree ? undefined : tree,
         files: shouldOmitFiles ? undefined : result.result,

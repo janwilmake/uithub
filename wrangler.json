@@ -5,11 +5,17 @@
   "compatibility_date": "2025-11-30",
   "main": "worker.ts",
   "assets": { "directory": "./" },
+  "kv_namespaces": [
+    { "binding": "KV", "id": "698c335bd4e343089a51846f803c75e0" }
+  ],
   "env": {
     "prod": {
       "routes": [
         { "custom_domain": true, "pattern": "uithub.com" },
         { "custom_domain": true, "pattern": "www.uithub.com" }
+      ],
+      "kv_namespaces": [
+        { "binding": "KV", "id": "698c335bd4e343089a51846f803c75e0" }
       ]
     }
   }
