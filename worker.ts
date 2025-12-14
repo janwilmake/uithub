@@ -1373,7 +1373,7 @@ export default {
             { status: 404 },
           );
         }
-        const repos = await response.json();
+        const repos: {}[] = await response.json();
         const acceptHeader =
           url.searchParams.get("accept") || request.headers.get("Accept");
         if (acceptHeader === "text/markdown") {
@@ -1386,7 +1386,7 @@ export default {
             )
             .join("\n")}`;
           return new Response(markdown, {
-            headers: { "Content-Type": "text/markdown" },
+            headers: { "Content-Type": "text/markdown;charset=utf8" },
           });
         }
         return new Response(generateProfileHTML(owner, repos), {
