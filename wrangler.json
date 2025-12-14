@@ -4,9 +4,13 @@
   "account_id": "080fd9e0587416d2fa30ed1f527e2323",
   "compatibility_date": "2025-11-30",
   "main": "worker.ts",
-  "assets": {"directory": "./"},
-  "env": {"prod":{  "routes": [
-    { "custom_domain": true, "pattern": "uithub.com" },
-    { "custom_domain": true, "pattern": "www.uithub.com" }
-  ]}}
+  "assets": { "directory": "./" },
+  "env": {
+    "prod": {
+      "routes": [
+        { "custom_domain": true, "pattern": "uithub.com" },
+        { "custom_domain": true, "pattern": "www.uithub.com" }
+      ]
+    }
+  }
 }

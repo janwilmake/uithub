@@ -1,18 +1,5 @@
 import { parse as parseYaml } from "yaml";
 
-// ==================== TYPES ====================
-
-type FileContent = {
-  content?: string;
-  buffer?: Buffer;
-};
-
-type HashedEntry = {
-  content: string | undefined;
-  size: number;
-  hash: string;
-};
-
 type ContentType = {
   type: "content" | "binary";
   content?: string;
@@ -117,6 +104,7 @@ async function handleLogin(
   scope: string,
 ): Promise<Response> {
   const url = new URL(request.url);
+  const isLocalhost = url.hostname === "localhost";
   const redirectTo = url.searchParams.get("redirect_to") || "/";
   const codeVerifier = generateCodeVerifier();
   const codeChallenge = await generateCodeChallenge(codeVerifier);
@@ -133,9 +121,9 @@ async function handleLogin(
     status: 302,
     headers: {
       Location: githubUrl.toString(),
-      "Set-Cookie": `oauth_state=${encodeURIComponent(
-        stateString,
-      )}; HttpOnly; Secure; SameSite=Lax; Max-Age=600; Path=/`,
+      "Set-Cookie": `oauth_state=${encodeURIComponent(stateString)}; HttpOnly;${
+        isLocalhost ? "" : " Secure;"
+      } SameSite=Lax; Max-Age=600; Path=/`,
     },
   });
 }
@@ -198,39 +186,41 @@ async function handleCallback(request: Request, env: Env): Promise<Response> {
   console.log({ tokenData, sessionData });
   const sessionToken = btoa(JSON.stringify(sessionData));
   const headers = new Headers({ Location: state.redirectTo || "/" });
+  const isLocalhost = url.hostname === "localhost";
+
   headers.append(
     "Set-Cookie",
-    "oauth_state=; HttpOnly; Secure; SameSite=Lax; Max-Age=0; Path=/",
+    `oauth_state=; HttpOnly;${
+      isLocalhost ? "" : " Secure;"
+    } SameSite=Lax; Max-Age=0; Path=/`,
   );
   headers.append(
     "Set-Cookie",
-    `session=${sessionToken}; HttpOnly; Secure; SameSite=Lax; Max-Age=${
-      7 * 24 * 60 * 60
-    }; Path=/`,
+    `session=${sessionToken}; HttpOnly;${
+      isLocalhost ? "" : " Secure;"
+    } SameSite=Lax; Max-Age=${7 * 24 * 60 * 60}; Path=/`,
   );
   return new Response(null, { status: 302, headers });
 }
 
 async function handleLogout(request: Request): Promise<Response> {
   const url = new URL(request.url);
+  const isLocalhost = url.hostname === "localhost";
+
   const redirectTo = url.searchParams.get("redirect_to") || "/";
+
   return new Response(null, {
     status: 302,
     headers: {
       Location: redirectTo,
-      "Set-Cookie":
-        "session=; HttpOnly; Secure; SameSite=Lax; Max-Age=0; Path=/",
+      "Set-Cookie": `session=; HttpOnly;${
+        isLocalhost ? "" : " Secure;"
+      } SameSite=Lax; Max-Age=0; Path=/`,
     },
   });
 }
 
 // ==================== UTILITY FUNCTIONS ====================
-
-function getCookie(request: Request, key: string): string | undefined {
-  const cookiesObject = parseCookies(request.headers.get("Cookie") || "");
-  const cookie = cookiesObject?.[key];
-  return cookie ? decodeURIComponent(cookie) : undefined;
-}
 
 function escapeHTML(str: string): string {
   if (typeof str !== "string") return "";
@@ -383,56 +373,45 @@ function compileGitignore(content: string): CompiledGitignore {
   };
 }
 
-// ==================== ZIP PARSING ====================
+// ==================== DEFLATE DECOMPRESSION ====================
 
-async function streamToString(
-  stream: ReadableStream,
-): Promise<HashedEntry | null> {
-  const reader = stream.getReader();
-  const textChunks: Uint8Array[] = [];
-  const decoder = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true });
-  let size = 0;
-  let isBinary = false;
-  try {
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      size += value.length;
-      if (!isBinary) {
-        try {
-          decoder.decode(value, { stream: true });
-          textChunks.push(value);
-        } catch {
-          isBinary = true;
-          textChunks.length = 0;
-        }
-      }
-    }
-    const hashBuffer = await crypto.subtle.digest(
-      "SHA-256",
-      new Uint8Array(textChunks.flatMap((chunk) => Array.from(chunk))),
-    );
-    const hash = Array.from(new Uint8Array(hashBuffer))
-      .map((b) => b.toString(16).padStart(2, "0"))
-      .join("");
-    if (isBinary) {
-      return { content: undefined, hash, size };
-    } else {
-      const combined = new Uint8Array(
-        textChunks.reduce((acc, chunk) => acc + chunk.length, 0),
-      );
-      let offset = 0;
-      for (const chunk of textChunks) {
-        combined.set(chunk, offset);
-        offset += chunk.length;
-      }
-      const content = new TextDecoder("utf-8").decode(combined);
-      return { content, size, hash };
-    }
-  } catch {
-    return null;
+/**
+ * Decompress DEFLATE-compressed data using the DecompressionStream API
+ * This handles ZIP files that use compression method 8 (DEFLATE)
+ */
+async function inflateRaw(compressedData: Uint8Array): Promise<Uint8Array> {
+  // DecompressionStream with 'deflate-raw' handles raw DEFLATE without zlib headers
+  const ds = new DecompressionStream("deflate-raw");
+  const writer = ds.writable.getWriter();
+  const reader = ds.readable.getReader();
+
+  // Write compressed data and close
+  writer.write(compressedData);
+  writer.close();
+
+  // Read all decompressed chunks
+  const chunks: Uint8Array[] = [];
+  let totalLength = 0;
+
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    chunks.push(value);
+    totalLength += value.length;
   }
+
+  // Combine chunks into single array
+  const result = new Uint8Array(totalLength);
+  let offset = 0;
+  for (const chunk of chunks) {
+    result.set(chunk, offset);
+    offset += chunk.length;
+  }
+
+  return result;
 }
+
+// ==================== ZIP PARSING ====================
 
 function shouldIncludeFile(context: {
   yamlParse?: any;
@@ -483,6 +462,29 @@ function shouldIncludeFile(context: {
   return true;
 }
 
+/**
+ * Check if data is valid UTF-8 text
+ */
+function isValidUtf8(data: Uint8Array): boolean {
+  try {
+    const decoder = new TextDecoder("utf-8", { fatal: true });
+    decoder.decode(data);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Calculate SHA-256 hash of data
+ */
+async function calculateHash(data: Uint8Array): Promise<string> {
+  const hashBuffer = await crypto.subtle.digest("SHA-256", data);
+  return Array.from(new Uint8Array(hashBuffer))
+    .map((b) => b.toString(16).padStart(2, "0"))
+    .join("");
+}
+
 async function parseZipStream(
   stream: ReadableStream,
   context: {
@@ -520,6 +522,7 @@ async function parseZipStream(
     yamlFilter,
     matchFilenames,
   } = context;
+
   let yamlParse: any;
   try {
     if (yamlFilter) {
@@ -533,9 +536,12 @@ async function parseZipStream(
         e.message,
     };
   }
+
   const fileContents: { [path: string]: ContentType } = {};
   let genignoreString: string | null = DEFAULT_GENIGNORE;
   let shaOrBranch = branch || "HEAD";
+
+  // Read entire stream into buffer
   const reader = stream.getReader();
   const chunks: Uint8Array[] = [];
   while (true) {
@@ -551,36 +557,82 @@ async function parseZipStream(
     fullBuffer.set(chunk, offset);
     offset += chunk.length;
   }
+
   let pos = 0;
   while (pos < fullBuffer.length - 4) {
+    // Look for local file header signature (PK\x03\x04)
     if (
       fullBuffer[pos] === 0x50 &&
       fullBuffer[pos + 1] === 0x4b &&
       fullBuffer[pos + 2] === 0x03 &&
       fullBuffer[pos + 3] === 0x04
     ) {
-      const fileNameLength = fullBuffer[pos + 26] | (fullBuffer[pos + 27] << 8);
-      const extraFieldLength =
-        fullBuffer[pos + 28] | (fullBuffer[pos + 29] << 8);
+      // Parse local file header
+      const compressionMethod =
+        fullBuffer[pos + 8] | (fullBuffer[pos + 9] << 8);
       const compressedSize =
         fullBuffer[pos + 18] |
         (fullBuffer[pos + 19] << 8) |
         (fullBuffer[pos + 20] << 16) |
         (fullBuffer[pos + 21] << 24);
+      const uncompressedSize =
+        fullBuffer[pos + 22] |
+        (fullBuffer[pos + 23] << 8) |
+        (fullBuffer[pos + 24] << 16) |
+        (fullBuffer[pos + 25] << 24);
+      const fileNameLength = fullBuffer[pos + 26] | (fullBuffer[pos + 27] << 8);
+      const extraFieldLength =
+        fullBuffer[pos + 28] | (fullBuffer[pos + 29] << 8);
+
       const fileNameStart = pos + 30;
       const fileName = new TextDecoder().decode(
         fullBuffer.slice(fileNameStart, fileNameStart + fileNameLength),
       );
+
       const dataStart = fileNameStart + fileNameLength + extraFieldLength;
       const dataEnd = dataStart + compressedSize;
+
       if (!fileName.endsWith("/")) {
         const filePath = fileName.split("/").slice(1).join("/");
-        if (filePath === ".genignore" && !disableGenignore) {
-          const content = new TextDecoder().decode(
-            fullBuffer.slice(dataStart, dataEnd),
-          );
-          genignoreString = content;
+
+        // Get the raw (possibly compressed) data
+        const rawData = fullBuffer.slice(dataStart, dataEnd);
+
+        // Decompress if needed
+        let fileData: Uint8Array;
+        try {
+          if (compressionMethod === 0) {
+            // Stored (no compression)
+            fileData = rawData;
+          } else if (compressionMethod === 8) {
+            // DEFLATE compression
+            fileData = await inflateRaw(rawData);
+          } else {
+            // Unsupported compression method - skip this file
+            console.warn(
+              `Unsupported compression method ${compressionMethod} for ${filePath}`,
+            );
+            pos = dataEnd;
+            continue;
+          }
+        } catch (e) {
+          // Decompression failed - skip this file
+          console.warn(`Failed to decompress ${filePath}:`, e);
+          pos = dataEnd;
+          continue;
         }
+
+        // Handle .genignore file
+        if (filePath === ".genignore" && !disableGenignore) {
+          try {
+            genignoreString = new TextDecoder("utf-8", { fatal: true }).decode(
+              fileData,
+            );
+          } catch {
+            // If .genignore isn't valid UTF-8, use default
+          }
+        }
+
         if (
           shouldIncludeFile({
             matchFilenames,
@@ -593,31 +645,19 @@ async function parseZipStream(
             paths,
           })
         ) {
-          const fileData = fullBuffer.slice(dataStart, dataEnd);
-          let isBinary = false;
-          const decoder = new TextDecoder("utf-8", { fatal: true });
-          try {
-            decoder.decode(fileData);
-          } catch {
-            isBinary = true;
-          }
-          if (!isBinary && maxFileSize && fileData.length > maxFileSize) {
+          // Check if it's valid UTF-8 text
+          const isText = isValidUtf8(fileData);
+
+          // Apply max file size filter only to text files
+          if (isText && maxFileSize && fileData.length > maxFileSize) {
+            pos = dataEnd;
             continue;
           }
-          const hashBuffer = await crypto.subtle.digest("SHA-256", fileData);
-          const hash = Array.from(new Uint8Array(hashBuffer))
-            .map((b) => b.toString(16).padStart(2, "0"))
-            .join("");
-          if (isBinary) {
-            fileContents[filePath] = {
-              type: "binary",
-              content: undefined,
-              hash,
-              size: fileData.length,
-              url: `https://raw.githubusercontent.com/${owner}/${repo}/${shaOrBranch}/${filePath}`,
-            };
-          } else {
-            const content = new TextDecoder().decode(fileData);
+
+          const hash = await calculateHash(fileData);
+
+          if (isText) {
+            const content = new TextDecoder("utf-8").decode(fileData);
             fileContents[filePath] = {
               type: "content",
               content,
@@ -625,14 +665,24 @@ async function parseZipStream(
               size: fileData.length,
               url: undefined,
             };
+          } else {
+            fileContents[filePath] = {
+              type: "binary",
+              content: undefined,
+              hash,
+              size: fileData.length,
+              url: `https://raw.githubusercontent.com/${owner}/${repo}/${shaOrBranch}/${filePath}`,
+            };
           }
         }
       }
+
       pos = dataEnd;
     } else {
       pos++;
     }
   }
+
   const genignore =
     genignoreString && !disableGenignore
       ? compileGitignore(genignoreString)
@@ -1350,7 +1400,6 @@ export default {
     // Repository content - check access first
     try {
       const repoAccess = await checkRepoAccess(owner, repo, apiKey);
-      // console.log({ repoAccess });
 
       // If repo doesn't exist or is private and we don't have token, require login
       if (!repoAccess.exists) {
