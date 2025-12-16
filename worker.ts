@@ -31,6 +31,7 @@ interface Env {
   GITHUB_CLIENT_SECRET: string;
   STRIPE_SECRET: string;
   STRIPE_PAYMENT_LINK: string;
+  STRIPE_PAYMENT_LINK_ID: string;
   STRIPE_WEBHOOK_SIGNING_SECRET: string;
   KV: KVNamespace;
 }
@@ -398,6 +399,14 @@ async function handleStripeWebhook(
 
   if (event.type === "checkout.session.completed") {
     const session = event.data.object;
+
+    if (session.payment_link !== env.STRIPE_PAYMENT_LINK_ID) {
+      console.log({
+        payment_link: session.payment_link,
+        payment_link_id: env.STRIPE_PAYMENT_LINK_ID,
+      });
+      return new Response("Incorrect payment link", { status: 400 });
+    }
 
     if (session.payment_status !== "paid" || !session.amount_subtotal) {
       return new Response("Payment not completed", { status: 400 });
@@ -1063,7 +1072,7 @@ function generateModalHTML(
   context: {
     loginUrl: string;
     privateAccessUrl: string;
-    paymentLink: string;
+    paymentLink: string | null;
     credit: number;
     username?: string;
     profilePicture?: string;
@@ -1300,7 +1309,7 @@ function generateModalHTML(
         </div>
         <div class="modal-step">
           <div class="modal-step-number">3</div>
-          <span class="modal-step-text">Add credit ($0.01 minimum)</span>
+          <span class="modal-step-text">Add credit</span>
         </div>
       </div>
       <a href="${paymentLink}" class="modal-button" target="_blank">
@@ -1338,7 +1347,7 @@ function generateViewHTML(context: {
   modalContext: {
     loginUrl: string;
     privateAccessUrl: string;
-    paymentLink: string;
+    paymentLink: string | null;
     credit: number;
     username?: string;
     profilePicture?: string;
@@ -1368,6 +1377,11 @@ function generateViewHTML(context: {
   const contentBlurStyle = modalState
     ? "pointer-events: none; user-select: none;"
     : "";
+
+  const isLoggedIn = !!modalContext.username;
+  const logoutUrl = `/logout?redirect_to=${encodeURIComponent(
+    url.pathname + url.search,
+  )}`;
 
   return `<!DOCTYPE html>
 <html lang="en">
@@ -1511,6 +1525,81 @@ function generateViewHTML(context: {
     .content-container {
       ${contentBlurStyle}
     }
+    .user-section {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      padding: 8px 12px;
+      background: rgba(255, 255, 255, 0.05);
+      border-radius: 12px;
+      border: 1px solid rgba(255, 255, 255, 0.1);
+    }
+    .user-avatar {
+      width: 32px;
+      height: 32px;
+      border-radius: 50%;
+      border: 2px solid rgba(139, 92, 246, 0.5);
+    }
+    .user-info {
+      display: flex;
+      flex-direction: column;
+      gap: 2px;
+    }
+    .user-name {
+      font-size: 13px;
+      font-weight: 600;
+      color: var(--text-color);
+    }
+    .user-credit {
+      font-size: 11px;
+      color: #22c55e;
+      font-weight: 500;
+     }
+    .logout-btn {
+      background: rgba(239, 68, 68, 0.1);
+      border: 1px solid rgba(239, 68, 68, 0.3);
+      color: #ef4444;
+      padding: 6px 12px;
+      border-radius: 8px;
+      font-size: 12px;
+      font-weight: 500;
+      cursor: pointer;
+      transition: all 0.2s;
+      text-decoration: none;
+      display: flex;
+      align-items: center;
+      gap: 4px;
+    }
+    .logout-btn:hover {
+      background: rgba(239, 68, 68, 0.2);
+      border-color: rgba(239, 68, 68, 0.5);
+    }
+    .login-btn {
+      background: linear-gradient(135deg, #8b5cf6 0%, #ec4899 100%);
+      border: none;
+      color: white;
+      padding: 8px 16px;
+      border-radius: 8px;
+      font-size: 13px;
+      font-weight: 600;
+      cursor: pointer;
+      transition: all 0.2s;
+      text-decoration: none;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+    .login-btn:hover {
+      transform: translateY(-1px);
+      box-shadow: 0 4px 12px rgba(139, 92, 246, 0.4);
+    }
+    .header-right {
+      display: flex;
+      flex-direction: row;
+      gap: 12px;
+      align-items: center;
+      justify-content: center;
+    }
   </style>
 </head>
 <body>
@@ -1528,7 +1617,47 @@ function generateViewHTML(context: {
       <select id="extSelect" onchange="updateFilters()"></select>
       <select style="max-width: 200px;" id="locationSelect" onchange="navigateToLocation()"></select>
     </div>
-    <div style="flex-direction: row; gap: 20px; display: flex; align-items:center; justify-content: center;">
+    <div class="header-right">
+      ${
+        isLoggedIn
+          ? `
+        <div class="user-section">
+          <img src="${modalContext.profilePicture}" alt="${
+              modalContext.username
+            }" class="user-avatar">
+          <a href="${
+            modalContext.paymentLink || "#"
+          }" target="_blank" style="text-decoration:none;">
+          <div class="user-info">
+            <span class="user-name">@${modalContext.username}</span>
+            ${
+              modalContext.credit > 0
+                ? `<span class="user-credit">$${(
+                    modalContext.credit / 100
+                  ).toFixed(2)} credit</span>`
+                : ""
+            }
+          </div>
+          </a>
+          <a href="${logoutUrl}" class="logout-btn">
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"></path>
+              <polyline points="16 17 21 12 16 7"></polyline>
+              <line x1="21" y1="12" x2="9" y2="12"></line>
+            </svg>
+            Logout
+          </a>
+        </div>
+      `
+          : `
+        <a href="${modalContext.loginUrl}" class="login-btn">
+          <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor">
+            <path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/>
+          </svg>
+          Sign in
+        </a>
+      `
+      }
       <p id="tokens">~${tokens} tokens</p>
       
       <div class="copy-menu-container">
@@ -1629,7 +1758,7 @@ function generateViewHTML(context: {
         </div>
       </div>
       
-      <a href="${url.origin.replace("github.com", "uithub.com")}${
+      <a href="${url.origin.replace("uithub.com", "github.com")}${
     url.pathname
   }" target="_blank">
         <svg class="github-icon" viewBox="0 0 16 16" version="1.1" width="32" height="32">
@@ -1801,6 +1930,9 @@ function generateViewHTML(context: {
       initializeFromURL();
     };
   </script>
+  <!-- 100% privacy-first analytics -->
+<script async src="https://scripts.simpleanalyticscdn.com/latest.js"></script>
+
 </body>
 </html>`;
 }
@@ -1992,7 +2124,7 @@ export default {
 
       const paymentLink = currentUser
         ? `${env.STRIPE_PAYMENT_LINK}?client_reference_id=${currentUser.id}`
-        : env.STRIPE_PAYMENT_LINK;
+        : null;
 
       const modalContext = {
         loginUrl,
@@ -2107,7 +2239,7 @@ export default {
       // If modal is shown, return with blurred content (empty placeholder)
       if (modalState && needHtml) {
         const placeholderFileString =
-          "Content hidden. Please complete the required steps above.";
+          "Content hidden. Please complete the required steps first.";
         const placeholderTree = {};
 
         const branchPart = branch ? ` at ${branch}` : "";
