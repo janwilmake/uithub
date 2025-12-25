@@ -26,6 +26,37 @@ interface UserAccount {
   premium: boolean;
 }
 
+interface RegisteredClient {
+  client_id: string;
+  client_secret: string;
+  redirect_uris: string[];
+  client_name: string;
+  created_at: number;
+}
+
+interface AuthorizationCode {
+  code: string;
+  client_id: string;
+  redirect_uri: string;
+  user_id: string;
+  github_access_token: string;
+  scopes: string;
+  code_challenge?: string;
+  code_challenge_method?: string;
+  expires_at: number;
+  resource?: string;
+}
+
+interface AccessToken {
+  token: string;
+  client_id: string;
+  user_id: string;
+  github_access_token: string;
+  scopes: string;
+  expires_at: number;
+  resource?: string;
+}
+
 interface Env {
   GITHUB_CLIENT_ID: string;
   GITHUB_CLIENT_SECRET: string;
@@ -40,6 +71,12 @@ interface OAuthState {
   redirectTo?: string;
   codeVerifier: string;
   scope: string;
+  clientId?: string;
+  clientRedirectUri?: string;
+  clientState?: string;
+  codeChallenge?: string;
+  codeChallengeMethod?: string;
+  resource?: string;
 }
 
 // ==================== CONSTANTS ====================
@@ -56,7 +93,7 @@ node_modules
 const LOCAL_FILE_HEADER = 0x04034b50;
 const CENTRAL_DIR_HEADER = 0x02014b50;
 
-// ==================== KV USER HELPERS ====================
+// ==================== KV HELPERS ====================
 
 async function getUserAccount(
   userId: string,
@@ -81,7 +118,6 @@ async function createOrUpdateUser(
 ): Promise<UserAccount> {
   const existing = await getUserAccount(userId, env);
   if (existing) {
-    // Update username and profile picture but keep other fields
     const updated = {
       ...existing,
       username: userData.username,
@@ -118,17 +154,65 @@ async function chargeForPrivateRepo(
   return { success: true, message: "Charged successfully" };
 }
 
-// ==================== OAUTH HELPERS ====================
+// Client registration helpers
+async function getRegisteredClient(
+  clientId: string,
+  env: Env,
+): Promise<RegisteredClient | null> {
+  const data = await env.KV.get(`client_${clientId}`, "json");
+  return data as RegisteredClient | null;
+}
 
-function parseCookies(cookieHeader: string): Record<string, string> {
-  const cookies: Record<string, string> = {};
-  cookieHeader.split(";").forEach((cookie) => {
-    const [name, value] = cookie.trim().split("=");
-    if (name && value) {
-      cookies[name] = decodeURIComponent(value);
-    }
+async function setRegisteredClient(
+  client: RegisteredClient,
+  env: Env,
+): Promise<void> {
+  await env.KV.put(`client_${client.client_id}`, JSON.stringify(client));
+}
+
+// Authorization code helpers
+async function storeAuthorizationCode(
+  code: AuthorizationCode,
+  env: Env,
+): Promise<void> {
+  await env.KV.put(`auth_code_${code.code}`, JSON.stringify(code), {
+    expirationTtl: 600, // 10 minutes
   });
-  return cookies;
+}
+
+async function getAuthorizationCode(
+  code: string,
+  env: Env,
+): Promise<AuthorizationCode | null> {
+  const data = await env.KV.get(`auth_code_${code}`, "json");
+  return data as AuthorizationCode | null;
+}
+
+async function deleteAuthorizationCode(code: string, env: Env): Promise<void> {
+  await env.KV.delete(`auth_code_${code}`);
+}
+
+// Access token helpers
+async function storeAccessToken(token: AccessToken, env: Env): Promise<void> {
+  await env.KV.put(`access_token_${token.token}`, JSON.stringify(token), {
+    expirationTtl: 86400, // 24 hours
+  });
+}
+
+async function getAccessTokenData(
+  token: string,
+  env: Env,
+): Promise<AccessToken | null> {
+  const data = await env.KV.get(`access_token_${token}`, "json");
+  return data as AccessToken | null;
+}
+
+// ==================== CRYPTO HELPERS ====================
+
+function generateRandomString(length: number = 32): string {
+  const array = new Uint8Array(length);
+  crypto.getRandomValues(array);
+  return Array.from(array, (b) => b.toString(16).padStart(2, "0")).join("");
 }
 
 function generateCodeVerifier(): string {
@@ -152,46 +236,376 @@ async function generateCodeChallenge(verifier: string): Promise<string> {
     .replace(/=/g, "");
 }
 
-function getAccessToken(request: Request): string | null {
+async function verifyCodeChallenge(
+  verifier: string,
+  challenge: string,
+  method: string,
+): Promise<boolean> {
+  if (method === "S256") {
+    const computed = await generateCodeChallenge(verifier);
+    return computed === challenge;
+  } else if (method === "plain") {
+    return verifier === challenge;
+  }
+  return false;
+}
+
+// ==================== COOKIE/SESSION HELPERS ====================
+
+function parseCookies(cookieHeader: string): Record<string, string> {
+  const cookies: Record<string, string> = {};
+  cookieHeader.split(";").forEach((cookie) => {
+    const [name, value] = cookie.trim().split("=");
+    if (name && value) {
+      cookies[name] = decodeURIComponent(value);
+    }
+  });
+  return cookies;
+}
+
+function getSessionFromCookie(request: Request): {
+  accessToken: string | null;
+  user: any | null;
+  scopes: string;
+} {
   const cookies = parseCookies(request.headers.get("Cookie") || "");
   const sessionToken = cookies.session;
-  if (!sessionToken) return null;
+  if (!sessionToken) return { accessToken: null, user: null, scopes: "" };
   try {
     const sessionData = JSON.parse(atob(sessionToken));
-    if (Date.now() > sessionData.exp) return null;
-    return sessionData.accessToken;
+    if (Date.now() > sessionData.exp)
+      return { accessToken: null, user: null, scopes: "" };
+    return {
+      accessToken: sessionData.accessToken,
+      user: sessionData.user,
+      scopes: sessionData.scopes || "",
+    };
   } catch {
-    return null;
+    return { accessToken: null, user: null, scopes: "" };
   }
 }
 
-function getCurrentUser(request: Request): any | null {
-  const cookies = parseCookies(request.headers.get("Cookie") || "");
-  const sessionToken = cookies.session;
-  if (!sessionToken) return null;
-  try {
-    const sessionData = JSON.parse(atob(sessionToken));
-    if (Date.now() > sessionData.exp) return null;
-    return sessionData.user;
-  } catch {
-    return null;
-  }
+function getBearerToken(request: Request): string | null {
+  const auth = request.headers.get("Authorization");
+  if (!auth) return null;
+  const parts = auth.split(" ");
+  if (parts.length !== 2 || parts[0].toLowerCase() !== "bearer") return null;
+  return parts[1];
 }
 
-function getSessionScopes(request: Request): string {
-  const cookies = parseCookies(request.headers.get("Cookie") || "");
-  const sessionToken = cookies.session;
-  if (!sessionToken) return "";
-  try {
-    const sessionData = JSON.parse(atob(sessionToken));
-    if (Date.now() > sessionData.exp) return "";
-    return sessionData.scopes || "";
-  } catch {
-    return "";
-  }
+// ==================== OAUTH WELL-KNOWN ENDPOINTS ====================
+
+function handleOAuthProtectedResource(url: URL): Response {
+  return Response.json({
+    resource: url.origin,
+    authorization_servers: [url.origin],
+  });
 }
 
-async function handleLogin(
+function handleOAuthAuthorizationServer(url: URL): Response {
+  return Response.json({
+    issuer: url.origin,
+    authorization_endpoint: `${url.origin}/authorize`,
+    token_endpoint: `${url.origin}/token`,
+    registration_endpoint: `${url.origin}/register`,
+    response_types_supported: ["code"],
+    grant_types_supported: ["authorization_code", "refresh_token"],
+    code_challenge_methods_supported: ["S256", "plain"],
+    scopes_supported: ["read", "repo"],
+    token_endpoint_auth_methods_supported: [
+      "client_secret_post",
+      "client_secret_basic",
+    ],
+  });
+}
+
+// ==================== DYNAMIC CLIENT REGISTRATION ====================
+
+async function handleClientRegistration(
+  request: Request,
+  env: Env,
+): Promise<Response> {
+  if (request.method !== "POST") {
+    return new Response("Method not allowed", { status: 405 });
+  }
+
+  let body: any;
+  try {
+    body = await request.json();
+  } catch {
+    return Response.json({ error: "invalid_request" }, { status: 400 });
+  }
+
+  const { redirect_uris, client_name } = body;
+
+  if (
+    !redirect_uris ||
+    !Array.isArray(redirect_uris) ||
+    redirect_uris.length === 0
+  ) {
+    return Response.json(
+      { error: "invalid_request", error_description: "redirect_uris required" },
+      { status: 400 },
+    );
+  }
+
+  const clientId = `client_${generateRandomString(16)}`;
+  const clientSecret = generateRandomString(32);
+
+  const client: RegisteredClient = {
+    client_id: clientId,
+    client_secret: clientSecret,
+    redirect_uris,
+    client_name: client_name || "Unknown Client",
+    created_at: Date.now(),
+  };
+
+  await setRegisteredClient(client, env);
+
+  return Response.json({
+    client_id: clientId,
+    client_secret: clientSecret,
+    redirect_uris,
+    client_name: client.client_name,
+    token_endpoint_auth_method: "client_secret_post",
+  });
+}
+
+// ==================== OAUTH AUTHORIZATION ENDPOINT ====================
+
+async function handleAuthorize(request: Request, env: Env): Promise<Response> {
+  const url = new URL(request.url);
+  const clientId = url.searchParams.get("client_id");
+  const redirectUri = url.searchParams.get("redirect_uri");
+  const responseType = url.searchParams.get("response_type");
+  const scope = url.searchParams.get("scope") || "read";
+  const state = url.searchParams.get("state");
+  const codeChallenge = url.searchParams.get("code_challenge");
+  const codeChallengeMethod =
+    url.searchParams.get("code_challenge_method") || "plain";
+  const resource = url.searchParams.get("resource");
+
+  // Validate required parameters
+  if (!clientId || !redirectUri || responseType !== "code") {
+    return new Response("Invalid authorization request", { status: 400 });
+  }
+
+  // Validate client
+  const client = await getRegisteredClient(clientId, env);
+  if (!client) {
+    return new Response("Unknown client", { status: 400 });
+  }
+
+  if (!client.redirect_uris.includes(redirectUri)) {
+    return new Response("Invalid redirect_uri", { status: 400 });
+  }
+
+  // Check if user is already logged in via session cookie
+  const session = getSessionFromCookie(request);
+  if (session.accessToken && session.user) {
+    // User is already authenticated, generate authorization code
+    const code = generateRandomString(32);
+    const authCode: AuthorizationCode = {
+      code,
+      client_id: clientId,
+      redirect_uri: redirectUri,
+      user_id: String(session.user.id),
+      github_access_token: session.accessToken,
+      scopes: scope,
+      code_challenge: codeChallenge || undefined,
+      code_challenge_method: codeChallenge ? codeChallengeMethod : undefined,
+      expires_at: Date.now() + 600000,
+      resource: resource || undefined,
+    };
+    await storeAuthorizationCode(authCode, env);
+
+    const redirectUrl = new URL(redirectUri);
+    redirectUrl.searchParams.set("code", code);
+    if (state) redirectUrl.searchParams.set("state", state);
+
+    return Response.redirect(redirectUrl.toString(), 302);
+  }
+
+  // Need to authenticate with GitHub first
+  // Store OAuth parameters in state to resume after GitHub auth
+  const githubScope = scope.includes("repo") ? "repo" : "user:email";
+  const codeVerifier = generateCodeVerifier();
+  const githubCodeChallenge = await generateCodeChallenge(codeVerifier);
+
+  const oauthState: OAuthState = {
+    codeVerifier,
+    scope: githubScope,
+    clientId,
+    clientRedirectUri: redirectUri,
+    clientState: state || undefined,
+    codeChallenge: codeChallenge || undefined,
+    codeChallengeMethod: codeChallenge ? codeChallengeMethod : undefined,
+    resource: resource || undefined,
+  };
+
+  const stateString = btoa(JSON.stringify(oauthState));
+  const isLocalhost = url.hostname === "localhost";
+
+  const githubUrl = new URL("https://github.com/login/oauth/authorize");
+  githubUrl.searchParams.set("client_id", env.GITHUB_CLIENT_ID);
+  githubUrl.searchParams.set("redirect_uri", `${url.origin}/callback`);
+  githubUrl.searchParams.set("scope", githubScope);
+  githubUrl.searchParams.set("state", stateString);
+  githubUrl.searchParams.set("code_challenge", githubCodeChallenge);
+  githubUrl.searchParams.set("code_challenge_method", "S256");
+
+  return new Response(null, {
+    status: 302,
+    headers: {
+      Location: githubUrl.toString(),
+      "Set-Cookie": `oauth_state=${encodeURIComponent(stateString)}; HttpOnly;${
+        isLocalhost ? "" : " Secure;"
+      } SameSite=Lax; Max-Age=600; Path=/`,
+    },
+  });
+}
+
+// ==================== OAUTH TOKEN ENDPOINT ====================
+
+async function handleToken(request: Request, env: Env): Promise<Response> {
+  if (request.method !== "POST") {
+    return new Response("Method not allowed", { status: 405 });
+  }
+
+  const contentType = request.headers.get("Content-Type") || "";
+  let body: Record<string, string> = {};
+
+  if (contentType.includes("application/x-www-form-urlencoded")) {
+    const text = await request.text();
+    const params = new URLSearchParams(text);
+    params.forEach((value, key) => {
+      body[key] = value;
+    });
+  } else if (contentType.includes("application/json")) {
+    body = await request.json();
+  } else {
+    return Response.json(
+      {
+        error: "invalid_request",
+        error_description: "Unsupported content type",
+      },
+      { status: 400 },
+    );
+  }
+
+  const grantType = body.grant_type;
+
+  if (grantType !== "authorization_code") {
+    return Response.json({ error: "unsupported_grant_type" }, { status: 400 });
+  }
+
+  const code = body.code;
+  const redirectUri = body.redirect_uri;
+  const clientId = body.client_id;
+  const clientSecret = body.client_secret;
+  const codeVerifier = body.code_verifier;
+
+  if (!code || !redirectUri || !clientId) {
+    return Response.json(
+      {
+        error: "invalid_request",
+        error_description: "Missing required parameters",
+      },
+      { status: 400 },
+    );
+  }
+
+  // Validate client
+  const client = await getRegisteredClient(clientId, env);
+  if (!client) {
+    return Response.json({ error: "invalid_client" }, { status: 401 });
+  }
+
+  // Validate client secret if provided
+  if (clientSecret && client.client_secret !== clientSecret) {
+    return Response.json({ error: "invalid_client" }, { status: 401 });
+  }
+
+  // Get and validate authorization code
+  const authCode = await getAuthorizationCode(code, env);
+  if (!authCode) {
+    return Response.json(
+      { error: "invalid_grant", error_description: "Invalid or expired code" },
+      { status: 400 },
+    );
+  }
+
+  if (authCode.client_id !== clientId) {
+    return Response.json(
+      { error: "invalid_grant", error_description: "Client mismatch" },
+      { status: 400 },
+    );
+  }
+
+  if (authCode.redirect_uri !== redirectUri) {
+    return Response.json(
+      { error: "invalid_grant", error_description: "Redirect URI mismatch" },
+      { status: 400 },
+    );
+  }
+
+  if (Date.now() > authCode.expires_at) {
+    await deleteAuthorizationCode(code, env);
+    return Response.json(
+      { error: "invalid_grant", error_description: "Code expired" },
+      { status: 400 },
+    );
+  }
+
+  // Validate PKCE if code challenge was provided
+  if (authCode.code_challenge) {
+    if (!codeVerifier) {
+      return Response.json(
+        { error: "invalid_grant", error_description: "code_verifier required" },
+        { status: 400 },
+      );
+    }
+    const valid = await verifyCodeChallenge(
+      codeVerifier,
+      authCode.code_challenge,
+      authCode.code_challenge_method || "plain",
+    );
+    if (!valid) {
+      return Response.json(
+        { error: "invalid_grant", error_description: "Invalid code_verifier" },
+        { status: 400 },
+      );
+    }
+  }
+
+  // Delete used authorization code
+  await deleteAuthorizationCode(code, env);
+
+  // Generate access token
+  const accessToken = generateRandomString(32);
+  const tokenData: AccessToken = {
+    token: accessToken,
+    client_id: clientId,
+    user_id: authCode.user_id,
+    github_access_token: authCode.github_access_token,
+    scopes: authCode.scopes,
+    expires_at: Date.now() + 86400000, // 24 hours
+    resource: authCode.resource,
+  };
+
+  await storeAccessToken(tokenData, env);
+
+  return Response.json({
+    access_token: accessToken,
+    token_type: "Bearer",
+    expires_in: 86400,
+    scope: authCode.scopes,
+  });
+}
+
+// ==================== BROWSER LOGIN FLOW ====================
+
+async function handleBrowserLogin(
   request: Request,
   env: Env,
   scope: string,
@@ -201,8 +615,16 @@ async function handleLogin(
   const redirectTo = url.searchParams.get("redirect_to") || "/";
   const codeVerifier = generateCodeVerifier();
   const codeChallenge = await generateCodeChallenge(codeVerifier);
-  const state: OAuthState = { redirectTo, codeVerifier, scope };
+  const resource = url.searchParams.get("resource");
+
+  const state: OAuthState = {
+    redirectTo,
+    codeVerifier,
+    scope,
+    resource: resource || undefined,
+  };
   const stateString = btoa(JSON.stringify(state));
+
   const githubUrl = new URL("https://github.com/login/oauth/authorize");
   githubUrl.searchParams.set("client_id", env.GITHUB_CLIENT_ID);
   githubUrl.searchParams.set("redirect_uri", `${url.origin}/callback`);
@@ -210,6 +632,7 @@ async function handleLogin(
   githubUrl.searchParams.set("state", stateString);
   githubUrl.searchParams.set("code_challenge", codeChallenge);
   githubUrl.searchParams.set("code_challenge_method", "S256");
+
   return new Response(null, {
     status: 302,
     headers: {
@@ -225,20 +648,26 @@ async function handleCallback(request: Request, env: Env): Promise<Response> {
   const url = new URL(request.url);
   const code = url.searchParams.get("code");
   const stateParam = url.searchParams.get("state");
+
   if (!code || !stateParam) {
     return new Response("Missing code or state parameter", { status: 400 });
   }
+
   const cookies = parseCookies(request.headers.get("Cookie") || "");
   const stateCookie = cookies.oauth_state;
+
   if (!stateCookie || stateCookie !== stateParam) {
     return new Response("Invalid state parameter", { status: 400 });
   }
+
   let state: OAuthState;
   try {
     state = JSON.parse(atob(stateParam));
   } catch {
     return new Response("Invalid state format", { status: 400 });
   }
+
+  // Exchange code for GitHub access token
   const tokenResponse = await fetch(
     "https://github.com/login/oauth/access_token",
     {
@@ -256,23 +685,26 @@ async function handleCallback(request: Request, env: Env): Promise<Response> {
       }),
     },
   );
+
   const tokenData = (await tokenResponse.json()) as any;
   if (!tokenData.access_token) {
     return new Response("Failed to get access token", { status: 400 });
   }
+
+  // Get user info from GitHub
   const userResponse = await fetch("https://api.github.com/user", {
     headers: {
       Authorization: `Bearer ${tokenData.access_token}`,
       Accept: "application/vnd.github.v3+json",
-      "User-Agent": "OAuth-Worker",
+      "User-Agent": "uithub",
     },
   });
+
   if (!userResponse.ok) {
     return new Response("Failed to get user info", { status: 400 });
   }
-  const userData = (await userResponse.json()) as any;
 
-  // Get actual granted scopes from response headers
+  const userData = (await userResponse.json()) as any;
   const grantedScopes = userResponse.headers.get("X-OAuth-Scopes") || "";
 
   // Create or update user in KV
@@ -294,6 +726,59 @@ async function handleCallback(request: Request, env: Env): Promise<Response> {
     }
   }
 
+  const isLocalhost = url.hostname === "localhost";
+
+  // Check if this is an OAuth client flow
+  if (state.clientId && state.clientRedirectUri) {
+    // Generate authorization code for the client
+    const authCode = generateRandomString(32);
+    const authCodeData: AuthorizationCode = {
+      code: authCode,
+      client_id: state.clientId,
+      redirect_uri: state.clientRedirectUri,
+      user_id: String(userData.id),
+      github_access_token: tokenData.access_token,
+      scopes: state.scope,
+      code_challenge: state.codeChallenge,
+      code_challenge_method: state.codeChallengeMethod,
+      expires_at: Date.now() + 600000,
+      resource: state.resource,
+    };
+    await storeAuthorizationCode(authCodeData, env);
+
+    const redirectUrl = new URL(state.clientRedirectUri);
+    redirectUrl.searchParams.set("code", authCode);
+    if (state.clientState) {
+      redirectUrl.searchParams.set("state", state.clientState);
+    }
+
+    // Also set browser session cookie
+    const sessionData = {
+      user: userData,
+      accessToken: tokenData.access_token,
+      scopes: grantedScopes,
+      exp: Date.now() + 7 * 24 * 3600 * 1000,
+    };
+    const sessionToken = btoa(JSON.stringify(sessionData));
+
+    const headers = new Headers({ Location: redirectUrl.toString() });
+    headers.append(
+      "Set-Cookie",
+      `oauth_state=; HttpOnly;${
+        isLocalhost ? "" : " Secure;"
+      } SameSite=Lax; Max-Age=0; Path=/`,
+    );
+    headers.append(
+      "Set-Cookie",
+      `session=${sessionToken}; HttpOnly;${
+        isLocalhost ? "" : " Secure;"
+      } SameSite=Lax; Max-Age=${7 * 24 * 60 * 60}; Path=/`,
+    );
+
+    return new Response(null, { status: 302, headers });
+  }
+
+  // Browser-only flow - set session cookie and redirect
   const sessionData = {
     user: userData,
     accessToken: tokenData.access_token,
@@ -301,8 +786,8 @@ async function handleCallback(request: Request, env: Env): Promise<Response> {
     exp: Date.now() + 7 * 24 * 3600 * 1000,
   };
   const sessionToken = btoa(JSON.stringify(sessionData));
+
   const headers = new Headers({ Location: state.redirectTo || "/" });
-  const isLocalhost = url.hostname === "localhost";
   headers.append(
     "Set-Cookie",
     `oauth_state=; HttpOnly;${
@@ -315,6 +800,7 @@ async function handleCallback(request: Request, env: Env): Promise<Response> {
       isLocalhost ? "" : " Secure;"
     } SameSite=Lax; Max-Age=${7 * 24 * 60 * 60}; Path=/`,
   );
+
   return new Response(null, { status: 302, headers });
 }
 
@@ -364,10 +850,7 @@ async function handleStripeWebhook(
   env: Env,
 ): Promise<Response> {
   if (!request.body) {
-    return new Response(JSON.stringify({ error: "No body" }), {
-      status: 400,
-      headers: { "Content-Type": "application/json" },
-    });
+    return Response.json({ error: "No body" }, { status: 400 });
   }
 
   const rawBody = await streamToBuffer(request.body);
@@ -379,10 +862,7 @@ async function handleStripeWebhook(
 
   const stripeSignature = request.headers.get("stripe-signature");
   if (!stripeSignature) {
-    return new Response(JSON.stringify({ error: "No signature" }), {
-      status: 400,
-      headers: { "Content-Type": "application/json" },
-    });
+    return Response.json({ error: "No signature" }, { status: 400 });
   }
 
   let event: Stripe.Event;
@@ -401,10 +881,6 @@ async function handleStripeWebhook(
     const session = event.data.object;
 
     if (session.payment_link !== env.STRIPE_PAYMENT_LINK_ID) {
-      console.log({
-        payment_link: session.payment_link,
-        payment_link_id: env.STRIPE_PAYMENT_LINK_ID,
-      });
       return new Response("Incorrect payment link", { status: 400 });
     }
 
@@ -425,7 +901,6 @@ async function handleStripeWebhook(
       account.credit += amount_subtotal;
       await setUserAccount(userId, account, env);
     } else {
-      // This shouldn't happen normally, but handle gracefully
       const newAccount: UserAccount = {
         credit: amount_subtotal,
         username: "",
@@ -1057,6 +1532,29 @@ async function parseZipStreaming(
     totalLines,
     usedTokens,
   };
+}
+
+// ==================== WWW-AUTHENTICATE HELPER ====================
+
+function createWWWAuthenticateHeader(url: URL, scope: string = "read"): string {
+  return (
+    `Bearer realm="${url.hostname}", ` +
+    `resource_metadata="${url.origin}/.well-known/oauth-protected-resource", ` +
+    `scope="${scope}"`
+  );
+}
+
+function createUnauthorizedResponse(
+  url: URL,
+  scope: string = "read",
+): Response {
+  return new Response("Unauthorized. Authentication required.", {
+    status: 401,
+    headers: {
+      "WWW-Authenticate": createWWWAuthenticateHeader(url, scope),
+      "Content-Type": "text/plain",
+    },
+  });
 }
 
 // ==================== MODAL HTML GENERATION ====================
@@ -2019,20 +2517,100 @@ async function checkRepoAccess(
   };
 }
 
+// ==================== DETERMINE RESPONSE FORMAT ====================
+
+interface ResponseFormat {
+  type: "html" | "json" | "yaml" | "markdown";
+  requiresAuth: boolean;
+}
+
+function determineResponseFormat(request: Request, url: URL): ResponseFormat {
+  const acceptParam = url.searchParams.get("accept");
+  const acceptHeader = request.headers.get("Accept") || "";
+
+  // Check query param first
+  if (acceptParam) {
+    if (acceptParam === "application/json") {
+      return { type: "json", requiresAuth: true };
+    }
+    if (acceptParam === "text/yaml") {
+      return { type: "yaml", requiresAuth: true };
+    }
+    if (acceptParam === "text/plain" || acceptParam === "text/markdown") {
+      return { type: "markdown", requiresAuth: true };
+    }
+  }
+
+  // Check Accept header
+  if (acceptHeader === "*/*" || acceptHeader === "") {
+    // Default to markdown for programmatic access (like curl without Accept header)
+    return { type: "markdown", requiresAuth: true };
+  }
+
+  if (acceptHeader.includes("text/html")) {
+    return { type: "html", requiresAuth: true };
+  }
+
+  if (acceptHeader.includes("application/json")) {
+    return { type: "json", requiresAuth: true };
+  }
+
+  if (acceptHeader.includes("text/yaml")) {
+    return { type: "yaml", requiresAuth: true };
+  }
+
+  if (
+    acceptHeader.includes("text/plain") ||
+    acceptHeader.includes("text/markdown")
+  ) {
+    return { type: "markdown", requiresAuth: true };
+  }
+
+  // Default to markdown for any other case
+  return { type: "markdown", requiresAuth: true };
+}
+
 // ==================== MAIN HANDLER ====================
 
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     const url = new URL(request.url);
 
-    // Handle OAuth routes
+    // Handle OAuth well-known endpoints
+    if (url.pathname === "/.well-known/oauth-protected-resource") {
+      return handleOAuthProtectedResource(url);
+    }
+
+    if (
+      url.pathname === "/.well-known/oauth-authorization-server" ||
+      url.pathname === "/.well-known/openid-configuration"
+    ) {
+      return handleOAuthAuthorizationServer(url);
+    }
+
+    // Handle OAuth endpoints
+    if (url.pathname === "/register" && request.method === "POST") {
+      return handleClientRegistration(request, env);
+    }
+
+    if (url.pathname === "/authorize") {
+      return handleAuthorize(request, env);
+    }
+
+    if (url.pathname === "/token" && request.method === "POST") {
+      return handleToken(request, env);
+    }
+
+    // Handle browser login flow
     if (url.pathname === "/login") {
       const scope = url.searchParams.get("scope") || "user:email";
-      return handleLogin(request, env, scope);
+      return handleBrowserLogin(request, env, scope);
     }
+
     if (url.pathname === "/callback") {
       return handleCallback(request, env);
     }
+
     if (url.pathname === "/logout") {
       return handleLogout(request);
     }
@@ -2045,25 +2623,77 @@ export default {
     const [_, owner, repo, page, branch, ...pathParts] =
       url.pathname.split("/");
     const path = pathParts.join("/");
-    const apiKey = getAccessToken(request);
-    const currentUser = getCurrentUser(request);
-    const sessionScopes = getSessionScopes(request);
 
-    // Root - show index.html
+    // Get authentication - check Bearer token first, then session cookie
+    const bearerToken = getBearerToken(request);
+    const session = getSessionFromCookie(request);
+
+    let githubAccessToken: string | null = null;
+    let currentUser: any = null;
+    let sessionScopes: string = "";
+
+    if (bearerToken) {
+      // Validate bearer token from OAuth flow
+      const tokenData = await getAccessTokenData(bearerToken, env);
+      if (tokenData && Date.now() < tokenData.expires_at) {
+        githubAccessToken = tokenData.github_access_token;
+        // Fetch user info to get currentUser
+        const userResponse = await fetch("https://api.github.com/user", {
+          headers: {
+            Authorization: `Bearer ${githubAccessToken}`,
+            Accept: "application/vnd.github.v3+json",
+            "User-Agent": "uithub",
+          },
+        });
+        if (userResponse.ok) {
+          currentUser = await userResponse.json();
+          sessionScopes = tokenData.scopes;
+        }
+      }
+    } else if (session.accessToken) {
+      // Use session cookie
+      githubAccessToken = session.accessToken;
+      currentUser = session.user;
+      sessionScopes = session.scopes;
+    }
+
+    // Determine response format
+    const responseFormat = determineResponseFormat(request, url);
+
+    // Root - show index.html (no auth required for root)
     if (!owner) {
-      return new Response("Index page", {
-        headers: { "Content-Type": "text/html" },
-      });
+      return new Response(
+        "Welcome to uithub - GitHub repos optimized for LLMs. Sign in to get started.",
+        {
+          headers: { "Content-Type": "text/html" },
+        },
+      );
     }
 
     // User profile page
     if (!repo) {
+      // Check authentication for profile pages
+      if (!currentUser && responseFormat.requiresAuth) {
+        if (responseFormat.type === "html") {
+          // Redirect to login for HTML
+          const loginUrl = `${
+            url.origin
+          }/login?scope=user:email&resource=${encodeURIComponent(
+            url.origin,
+          )}&redirect_to=${encodeURIComponent(url.pathname + url.search)}`;
+          return Response.redirect(loginUrl, 302);
+        } else {
+          return createUnauthorizedResponse(url, "read");
+        }
+      }
+
       try {
         const headers: HeadersInit = {
           Accept: "application/vnd.github.v3+json",
           "User-Agent": "uithub",
         };
-        if (apiKey) headers["Authorization"] = `token ${apiKey}`;
+        if (githubAccessToken)
+          headers["Authorization"] = `token ${githubAccessToken}`;
 
         const response = await fetch(
           `https://api.github.com/users/${owner}/repos?per_page=100`,
@@ -2078,9 +2708,8 @@ export default {
           );
         }
         const repos: {}[] = await response.json();
-        const acceptHeader =
-          url.searchParams.get("accept") || request.headers.get("Accept");
-        if (acceptHeader === "text/markdown") {
+
+        if (responseFormat.type === "markdown") {
           const markdown = `# ${owner}'s repos (${repos.length}):\n\n${repos
             .map(
               (r: any) =>
@@ -2093,6 +2722,7 @@ export default {
             headers: { "Content-Type": "text/markdown;charset=utf8" },
           });
         }
+
         return new Response(generateProfileHTML(owner, repos), {
           headers: { "Content-Type": "text/html" },
         });
@@ -2101,21 +2731,81 @@ export default {
       }
     }
 
-    // Repository content - check access first
+    // Repository content - authentication required for all formats
+    if (!currentUser && responseFormat.requiresAuth) {
+      if (responseFormat.type === "html") {
+        // For HTML, show login modal
+        const loginUrl = `${
+          url.origin
+        }/login?scope=user:email&resource=${encodeURIComponent(
+          url.origin,
+        )}&redirect_to=${encodeURIComponent(url.pathname + url.search)}`;
+        const privateAccessUrl = `${
+          url.origin
+        }/login?scope=repo&resource=${encodeURIComponent(
+          url.origin,
+        )}&redirect_to=${encodeURIComponent(url.pathname + url.search)}`;
+
+        const modalContext = {
+          loginUrl,
+          privateAccessUrl,
+          paymentLink: null,
+          credit: 0,
+          username: undefined,
+          profilePicture: undefined,
+        };
+
+        const placeholderFileString =
+          "Content hidden. Please sign in to continue.";
+        const placeholderTree = {};
+
+        const branchPart = branch ? ` at ${branch}` : "";
+        const title = `${owner}/${repo} - uithub`;
+        const description = `LLM context for ${repo}. /${path}${branchPart}`;
+
+        const viewHtml = generateViewHTML({
+          url,
+          title,
+          description,
+          fileString: placeholderFileString,
+          tokens: 0,
+          totalTokens: 0,
+          totalLines: 0,
+          tree: placeholderTree,
+          default_branch: undefined,
+          modalState: "login_required",
+          modalContext,
+        });
+
+        return new Response(viewHtml, {
+          headers: {
+            "Content-Type": "text/html",
+            "X-XSS-Protection": "1; mode=block",
+            "X-Content-Type-Options": "nosniff",
+            "X-Frame-Options": "DENY",
+          },
+        });
+      } else {
+        // For non-HTML, return 401 with WWW-Authenticate header
+        return createUnauthorizedResponse(url, "read");
+      }
+    }
+
+    // User is authenticated, check repo access
     try {
-      const repoAccess = await checkRepoAccess(owner, repo, apiKey);
+      const repoAccess = await checkRepoAccess(owner, repo, githubAccessToken);
 
       // Prepare modal context
       const loginUrl = `${
         url.origin
-      }/login?scope=user:email&redirect_to=${encodeURIComponent(
-        url.pathname + url.search,
-      )}`;
+      }/login?scope=user:email&resource=${encodeURIComponent(
+        url.origin,
+      )}&redirect_to=${encodeURIComponent(url.pathname + url.search)}`;
       const privateAccessUrl = `${
         url.origin
-      }/login?scope=repo&redirect_to=${encodeURIComponent(
-        url.pathname + url.search,
-      )}`;
+      }/login?scope=repo&resource=${encodeURIComponent(
+        url.origin,
+      )}&redirect_to=${encodeURIComponent(url.pathname + url.search)}`;
 
       let userAccount: UserAccount | null = null;
       if (currentUser) {
@@ -2135,51 +2825,31 @@ export default {
         profilePicture: currentUser?.avatar_url,
       };
 
-      // Determine modal state
+      // Determine modal state for private repos
       let modalState: ModalState = null;
 
-      // Parse query params
-      const accept =
-        url.searchParams.get("accept") || request.headers.get("Accept") || "";
-      const needHtml =
-        accept?.includes("text/html") ||
-        (!accept && !url.searchParams.get("accept"));
-
-      // For HTML responses, check if user is logged in
-      if (needHtml && !currentUser) {
-        // Show login modal for public repos
-        if (repoAccess.exists && !repoAccess.isPrivate) {
-          modalState = "login_required";
-        }
-      }
-
-      // Handle private repos
       if (!repoAccess.exists || repoAccess.isPrivate) {
-        if (!currentUser) {
-          // Not logged in at all
-          if (needHtml) {
-            modalState = "login_required";
-          } else {
-            return new Response(
-              "Repository not found or private. Authentication required.",
-              { status: 401 },
-            );
-          }
-        } else if (!sessionScopes.includes("repo")) {
-          // Logged in but no private repo scope
-          if (needHtml) {
+        if (!sessionScopes.includes("repo")) {
+          // Need private repo scope
+          if (responseFormat.type === "html") {
             modalState = "private_access_required";
           } else {
-            return new Response("Private repository access required", {
-              status: 403,
-            });
+            return new Response(
+              "Private repository access required. Please authenticate with 'repo' scope.",
+              {
+                status: 403,
+                headers: {
+                  "WWW-Authenticate": createWWWAuthenticateHeader(url, "repo"),
+                },
+              },
+            );
           }
         } else if (
           !userAccount ||
           userAccount.credit < PRIVATE_REPO_COST_CENTS
         ) {
-          // Has scope but insufficient credit
-          if (needHtml) {
+          // Need credit
+          if (responseFormat.type === "html") {
             modalState = "credit_required";
           } else {
             return new Response(
@@ -2196,7 +2866,7 @@ export default {
             env,
           );
           if (!chargeResult.success) {
-            if (needHtml) {
+            if (responseFormat.type === "html") {
               modalState = "credit_required";
             } else {
               return new Response(chargeResult.message, { status: 402 });
@@ -2205,39 +2875,8 @@ export default {
         }
       }
 
-      // If we have a modal state and need HTML, we still process but show with modal
-      // Parse query params
-      const maxTokensParam = url.searchParams.get("maxTokens");
-      const shouldAddLineNumbers = url.searchParams.get("lines") !== "false";
-      const includeExt = url.searchParams.get("ext")?.split(",");
-      const includeDir = url.searchParams.get("dir")?.split(",");
-      const excludeExt = url.searchParams.get("exclude-ext")?.split(",");
-      const excludeDir = url.searchParams.get("exclude-dir")?.split(",");
-      const disableGenignore =
-        url.searchParams.get("disableGenignore") === "true";
-      const maxFileSize =
-        parseInt(url.searchParams.get("maxFileSize") || "0", 10) || undefined;
-      const yamlFilter = url.searchParams.get("yamlFilter") || undefined;
-      const shouldOmitFiles = url.searchParams.get("omitFiles") === "true";
-      const shouldOmitTree = url.searchParams.get("omitTree") === "true";
-      const matchFilenames = url.searchParams
-        .get("matchFilenames")
-        ?.split(",")
-        .map((x) => x.trim())
-        .filter(Boolean);
-
-      const isJson = accept === "application/json";
-      const isYaml = accept === "text/yaml";
-      const needStringOrHtml = !isJson && !isYaml;
-
-      // Default to 50k tokens
-      const maxTokens =
-        maxTokensParam && !isNaN(Number(maxTokensParam))
-          ? Number(maxTokensParam)
-          : DEFAULT_MAX_TOKENS;
-
-      // If modal is shown, return with blurred content (empty placeholder)
-      if (modalState && needHtml) {
+      // If modal state is set for HTML, show modal with blurred content
+      if (modalState && responseFormat.type === "html") {
         const placeholderFileString =
           "Content hidden. Please complete the required steps first.";
         const placeholderTree = {};
@@ -2270,15 +2909,40 @@ export default {
         });
       }
 
+      // Parse query params
+      const maxTokensParam = url.searchParams.get("maxTokens");
+      const shouldAddLineNumbers = url.searchParams.get("lines") !== "false";
+      const includeExt = url.searchParams.get("ext")?.split(",");
+      const includeDir = url.searchParams.get("dir")?.split(",");
+      const excludeExt = url.searchParams.get("exclude-ext")?.split(",");
+      const excludeDir = url.searchParams.get("exclude-dir")?.split(",");
+      const disableGenignore =
+        url.searchParams.get("disableGenignore") === "true";
+      const maxFileSize =
+        parseInt(url.searchParams.get("maxFileSize") || "0", 10) || undefined;
+      const yamlFilter = url.searchParams.get("yamlFilter") || undefined;
+      const shouldOmitFiles = url.searchParams.get("omitFiles") === "true";
+      const shouldOmitTree = url.searchParams.get("omitTree") === "true";
+      const matchFilenames = url.searchParams
+        .get("matchFilenames")
+        ?.split(",")
+        .map((x) => x.trim())
+        .filter(Boolean);
+
+      const maxTokens =
+        maxTokensParam && !isNaN(Number(maxTokensParam))
+          ? Number(maxTokensParam)
+          : DEFAULT_MAX_TOKENS;
+
       // Fetch from GitHub
       const ref = branch && branch !== "" ? branch : "HEAD";
-      const isPrivate = !!apiKey && repoAccess.isPrivate;
+      const isPrivate = !!githubAccessToken && repoAccess.isPrivate;
       const branchSuffix = branch && branch !== "" ? `/${branch}` : "";
       const apiUrl = isPrivate
         ? `https://api.github.com/repos/${owner}/${repo}/zipball${branchSuffix}`
         : `https://github.com/${owner}/${repo}/archive/${ref}.zip`;
       const headers: HeadersInit = isPrivate
-        ? { Authorization: `token ${apiKey}` }
+        ? { Authorization: `token ${githubAccessToken}` }
         : {};
       headers["User-Agent"] = "uithub";
 
@@ -2313,7 +2977,7 @@ export default {
         });
       }
 
-      // Build tree from all paths for navigation, but only include selected files in output
+      // Build tree from all paths for navigation
       const tree = filePathToNestedObject({ ...result.result }, () => null);
       const treeString = nestedObjectToTreeString(tree);
       const treeTokens = Math.round(treeString.length / CHARACTERS_PER_TOKEN);
@@ -2340,8 +3004,8 @@ export default {
         (treeString + "\n\n" + filePart).length / CHARACTERS_PER_TOKEN,
       );
 
-      // Return HTML
-      if (needHtml) {
+      // Return based on format
+      if (responseFormat.type === "html") {
         const branchPart = branch ? ` at ${branch}` : "";
         const title = `${owner}/${repo} - uithub`;
         const description = `LLM context for ${repo}. /${path}${branchPart} contains ${tokens} tokens.`;
@@ -2370,14 +3034,13 @@ export default {
         });
       }
 
-      // Return text
-      if (needStringOrHtml) {
+      if (responseFormat.type === "markdown") {
         return new Response(fileString, {
-          headers: { "Content-Type": "text/plain" },
+          headers: { "Content-Type": "text/markdown; charset=utf-8" },
         });
       }
 
-      // Return JSON/YAML
+      // JSON/YAML response
       const body = {
         size: {
           tokens,
@@ -2389,7 +3052,7 @@ export default {
         files: shouldOmitFiles ? undefined : result.result,
       };
 
-      if (isYaml) {
+      if (responseFormat.type === "yaml") {
         return new Response(JSON.stringify(body), {
           headers: { "Content-Type": "text/yaml" },
         });
