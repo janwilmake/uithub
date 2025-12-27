@@ -2622,6 +2622,8 @@ export default {
 
     const [_, owner, repo, page, branch, ...pathParts] =
       url.pathname.split("/");
+
+    // folders need an additional slash
     const path = pathParts.join("/");
 
     // Get authentication - check Bearer token first, then session cookie
