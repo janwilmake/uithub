@@ -1,4 +1,4 @@
-import { parse as parseYaml, stringify } from "yaml";
+import { stringify } from "yaml";
 import {
   type Env,
   type UserAccount,
@@ -7,63 +7,24 @@ import {
   createUnauthorizedResponse,
   getUser,
 } from "./auth";
+import {
+  parseZipStreaming,
+  addLineNumbers,
+  CHARACTERS_PER_TOKEN,
+  type ContentType,
+  type StreamingParseContext,
+} from "./parse-zip";
 
 // ==================== CONSTANTS ====================
 
-const CHARACTERS_PER_TOKEN = 5;
 const DEFAULT_MAX_TOKENS = 50000;
 const PRIVATE_REPO_COST_CENTS = 1; // $0.01
-const DEFAULT_GENIGNORE = `package-lock.json
-build
-node_modules
-`;
-
-// ZIP signatures
-const LOCAL_FILE_HEADER = 0x04034b50;
-const CENTRAL_DIR_HEADER = 0x02014b50;
 
 // ==================== TYPES ====================
-
-type ContentType = {
-  type: "content" | "binary";
-  content?: string;
-  url?: string;
-  hash: string;
-  size: number;
-};
 
 type NestedObject<T = null> = {
   [key: string]: NestedObject<T> | T;
 };
-
-interface CompiledGitignore {
-  accepts: (input: string) => boolean;
-  denies: (input: string) => boolean;
-}
-
-interface ProcessedFile {
-  path: string;
-  content: ContentType;
-  tokens: number;
-  lines: number;
-}
-
-interface StreamingParseContext {
-  owner: string;
-  repo: string;
-  branch?: string;
-  includeExt?: string[];
-  excludeExt?: string[];
-  yamlFilter?: string;
-  paths?: string[];
-  includeDir?: string[];
-  excludeDir?: string[];
-  disableGenignore?: boolean;
-  maxFileSize?: number;
-  matchFilenames?: string[];
-  maxTokens: number;
-  shouldAddLineNumbers: boolean;
-}
 
 type ModalState =
   | "login_required"
@@ -73,6 +34,36 @@ type ModalState =
 
 interface ResponseFormat {
   type: "html" | "json" | "yaml" | "markdown";
+}
+
+interface RepoRequestParams {
+  maxTokens: number;
+  shouldAddLineNumbers: boolean;
+  includeExt?: string[];
+  includeDir?: string[];
+  excludeExt?: string[];
+  excludeDir?: string[];
+  disableGenignore: boolean;
+  maxFileSize?: number;
+  yamlFilter?: string;
+  shouldOmitFiles: boolean;
+  shouldOmitTree: boolean;
+  matchFilenames?: string[];
+}
+
+interface ModalContext {
+  loginUrl: string;
+  privateAccessUrl: string;
+  paymentLink: string | null;
+  credit: number;
+  username?: string;
+  profilePicture?: string;
+}
+
+interface RepoAccess {
+  exists: boolean;
+  isPrivate: boolean;
+  default_branch?: string;
 }
 
 // ==================== UTILITY FUNCTIONS ====================
@@ -156,547 +147,183 @@ function nestedObjectToTreeString<T>(
   return result;
 }
 
-// ==================== GITIGNORE PARSER ====================
+// ==================== MODAL STATE LOGIC ====================
 
-function escapeRegex(pattern: string): string {
-  return pattern.replace(/[\-\[\]\/\{\}\(\)\+\?\.\\\^\$\|]/g, "\\$&");
+function determineModalState(
+  currentUser: any,
+  sessionScopes: string,
+  userAccount: UserAccount | null,
+  repoAccess: RepoAccess,
+): ModalState {
+  if (!currentUser) return "login_required";
+
+  if (!repoAccess.exists || repoAccess.isPrivate) {
+    if (!sessionScopes.includes("repo")) {
+      return "private_access_required";
+    }
+    if (!userAccount || userAccount.credit < PRIVATE_REPO_COST_CENTS) {
+      return "credit_required";
+    }
+  }
+
+  return null;
 }
 
-function prepareRegexPattern(pattern: string): string {
-  return escapeRegex(pattern).replace("**", "(.+)").replace("*", "([^\\/]+)");
+// ==================== URL BUILDERS ====================
+
+function buildModalContextUrls(
+  url: URL,
+  env: Env,
+  currentUser: any,
+): { loginUrl: string; privateAccessUrl: string; paymentLink: string | null } {
+  const redirectParams = `resource=${encodeURIComponent(
+    url.origin,
+  )}&redirect_to=${encodeURIComponent(url.pathname + url.search)}`;
+  const loginUrl = `${url.origin}/login?scope=user:email&${redirectParams}`;
+  const privateAccessUrl = `${url.origin}/login?scope=repo&${redirectParams}`;
+  const paymentLink = currentUser
+    ? `${env.STRIPE_PAYMENT_LINK}?client_reference_id=${currentUser.id}`
+    : null;
+
+  return { loginUrl, privateAccessUrl, paymentLink };
 }
 
-function createRegExp(patterns: string[]): RegExp {
-  return patterns.length > 0
-    ? new RegExp(`^((${patterns.join(")|(")}))`)
-    : new RegExp("$^");
-}
+// ==================== QUERY PARAMETER PARSING ====================
 
-function parseGitignore(content: string): {
-  positives: RegExp;
-  negatives: RegExp;
-} {
-  const lists: [string[], string[]] = content
-    .split("\n")
-    .map((line) => line.trim())
-    .filter((line) => line && line[0] !== "#")
-    .reduce(
-      (lists, line) => {
-        const isNegative = line[0] === "!";
-        if (isNegative) line = line.slice(1);
-        if (line[0] === "/") line = line.slice(1);
-        lists[isNegative ? 1 : 0].push(line);
-        return lists;
-      },
-      [[], []] as [string[], string[]],
-    );
+function parseRepoRequestParams(url: URL): RepoRequestParams {
+  const maxTokensParam = url.searchParams.get("maxTokens");
   return {
-    positives: createRegExp(lists[0].sort().map(prepareRegexPattern)),
-    negatives: createRegExp(lists[1].sort().map(prepareRegexPattern)),
+    maxTokens:
+      maxTokensParam && !isNaN(Number(maxTokensParam))
+        ? Number(maxTokensParam)
+        : DEFAULT_MAX_TOKENS,
+    shouldAddLineNumbers: url.searchParams.get("lines") !== "false",
+    includeExt: url.searchParams.get("ext")?.split(","),
+    includeDir: url.searchParams.get("dir")?.split(","),
+    excludeExt: url.searchParams.get("exclude-ext")?.split(","),
+    excludeDir: url.searchParams.get("exclude-dir")?.split(","),
+    disableGenignore: url.searchParams.get("disableGenignore") === "true",
+    maxFileSize:
+      parseInt(url.searchParams.get("maxFileSize") || "0", 10) || undefined,
+    yamlFilter: url.searchParams.get("yamlFilter") || undefined,
+    shouldOmitFiles: url.searchParams.get("omitFiles") === "true",
+    shouldOmitTree: url.searchParams.get("omitTree") === "true",
+    matchFilenames: url.searchParams
+      .get("matchFilenames")
+      ?.split(",")
+      .map((x) => x.trim())
+      .filter(Boolean),
   };
 }
 
-function compileGitignore(content: string): CompiledGitignore {
-  const { positives, negatives } = parseGitignore(content);
-  const checkInput = (input: string): string =>
-    input[0] === "/" ? input.slice(1) : input;
-  return {
-    accepts: (input: string): boolean => {
-      input = checkInput(input);
-      return negatives.test(input) || !positives.test(input);
-    },
-    denies: (input: string): boolean => {
-      input = checkInput(input);
-      return !(negatives.test(input) || !positives.test(input));
-    },
-  };
-}
+// ==================== RESPONSE FORMAT ====================
 
-// ==================== STREAMING ZIP PARSER ====================
+function determineResponseFormat(request: Request, url: URL): ResponseFormat {
+  const acceptParam = url.searchParams.get("accept");
+  const acceptHeader = request.headers.get("Accept") || "";
 
-class StreamingZipReader {
-  private buffer: Uint8Array = new Uint8Array(0);
-  private reader: ReadableStreamDefaultReader<Uint8Array>;
-  private done: boolean = false;
-
-  constructor(stream: ReadableStream<Uint8Array>) {
-    this.reader = stream.getReader();
+  if (acceptParam) {
+    if (acceptParam === "application/json") return { type: "json" };
+    if (acceptParam === "text/yaml") return { type: "yaml" };
+    if (acceptParam === "text/plain" || acceptParam === "text/markdown")
+      return { type: "markdown" };
   }
 
-  private async ensureBytes(needed: number): Promise<boolean> {
-    while (this.buffer.length < needed && !this.done) {
-      const { done, value } = await this.reader.read();
-      if (done) {
-        this.done = true;
-        break;
-      }
-      const newBuffer = new Uint8Array(this.buffer.length + value.length);
-      newBuffer.set(this.buffer, 0);
-      newBuffer.set(value, this.buffer.length);
-      this.buffer = newBuffer;
-    }
-    return this.buffer.length >= needed;
-  }
-
-  private consume(bytes: number): Uint8Array {
-    const result = this.buffer.slice(0, bytes);
-    this.buffer = this.buffer.slice(bytes);
-    return result;
-  }
-
-  private readUint16(offset: number = 0): number {
-    return this.buffer[offset] | (this.buffer[offset + 1] << 8);
-  }
-
-  private readUint32(offset: number = 0): number {
-    return (
-      this.buffer[offset] |
-      (this.buffer[offset + 1] << 8) |
-      (this.buffer[offset + 2] << 16) |
-      (this.buffer[offset + 3] << 24)
-    );
-  }
-
-  async *entries(): AsyncGenerator<{
-    fileName: string;
-    getData: () => Promise<Uint8Array | null>;
-  }> {
-    while (true) {
-      if (!(await this.ensureBytes(4))) break;
-
-      const signature = this.readUint32(0);
-
-      if (signature === CENTRAL_DIR_HEADER || signature !== LOCAL_FILE_HEADER) {
-        break;
-      }
-
-      if (!(await this.ensureBytes(30))) break;
-
-      const compressionMethod = this.readUint16(8);
-      const compressedSize = this.readUint32(18);
-      const fileNameLength = this.readUint16(26);
-      const extraFieldLength = this.readUint16(28);
-
-      if (!(await this.ensureBytes(30 + fileNameLength))) break;
-
-      const fileName = new TextDecoder().decode(
-        this.buffer.slice(30, 30 + fileNameLength),
-      );
-
-      const headerSize = 30 + fileNameLength + extraFieldLength;
-
-      if (!(await this.ensureBytes(headerSize))) break;
-
-      this.consume(headerSize);
-
-      const generalPurposeFlag =
-        this.buffer.length >= 6 ? this.readUint16(6 - headerSize) : 0;
-      const hasDataDescriptor = (generalPurposeFlag & 0x08) !== 0;
-
-      if (fileName.endsWith("/")) {
-        yield {
-          fileName,
-          getData: async () => null,
-        };
-        continue;
-      }
-
-      const currentCompressedSize = compressedSize;
-
-      yield {
-        fileName,
-        getData: async (): Promise<Uint8Array | null> => {
-          if (currentCompressedSize === 0 && !hasDataDescriptor) {
-            return new Uint8Array(0);
-          }
-
-          if (!(await this.ensureBytes(currentCompressedSize))) {
-            return null;
-          }
-
-          const compressedData = this.consume(currentCompressedSize);
-
-          if (hasDataDescriptor) {
-            if (await this.ensureBytes(4)) {
-              const maybeSignature = this.readUint32(0);
-              if (maybeSignature === 0x08074b50) {
-                await this.ensureBytes(16);
-                this.consume(16);
-              } else {
-                await this.ensureBytes(12);
-                this.consume(12);
-              }
-            }
-          }
-
-          if (compressionMethod === 0) {
-            return compressedData;
-          } else if (compressionMethod === 8) {
-            try {
-              return await inflateRaw(compressedData);
-            } catch {
-              return null;
-            }
-          }
-          return null;
-        },
-      };
-    }
-  }
-
-  async cancel(): Promise<void> {
-    try {
-      await this.reader.cancel();
-    } catch {
-      // Ignore cancellation errors
-    }
-  }
-}
-
-async function inflateRaw(compressedData: Uint8Array): Promise<Uint8Array> {
-  const ds = new DecompressionStream("deflate-raw");
-  const writer = ds.writable.getWriter();
-  const reader = ds.readable.getReader();
-
-  writer.write(compressedData);
-  writer.close();
-
-  const chunks: Uint8Array[] = [];
-  let totalLength = 0;
-
-  while (true) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    chunks.push(value);
-    totalLength += value.length;
-  }
-
-  const result = new Uint8Array(totalLength);
-  let offset = 0;
-  for (const chunk of chunks) {
-    result.set(chunk, offset);
-    offset += chunk.length;
-  }
-
-  return result;
-}
-
-// ==================== FILE FILTERING ====================
-
-function shouldIncludeFile(context: {
-  yamlParse?: any;
-  filePath: string;
-  includeExt?: string[];
-  excludeExt?: string[];
-  includeDir?: string[];
-  excludeDir?: string[];
-  paths?: string[];
-  matchFilenames?: string[];
-}): boolean {
-  const {
-    excludeDir,
-    excludeExt,
-    filePath,
-    includeDir,
-    includeExt,
-    paths,
-    yamlParse,
-    matchFilenames,
-  } = context;
-  const ext = filePath.split(".").pop()!;
-  const lowercaseFilename = filePath.split("/").pop()!.toLowerCase();
-
+  if (acceptHeader === "*/*" || acceptHeader === "")
+    return { type: "markdown" };
+  if (acceptHeader.includes("text/html")) return { type: "html" };
+  if (acceptHeader.includes("application/json")) return { type: "json" };
+  if (acceptHeader.includes("text/yaml")) return { type: "yaml" };
   if (
-    matchFilenames &&
-    !matchFilenames.find((name) => name.toLowerCase() === lowercaseFilename)
-  ) {
-    return false;
-  }
-  if (includeExt && !includeExt.includes(ext)) return false;
-  if (excludeExt && excludeExt.includes(ext)) return false;
+    acceptHeader.includes("text/plain") ||
+    acceptHeader.includes("text/markdown")
+  )
+    return { type: "markdown" };
 
-  const pathAllowed =
-    paths && paths.length > 0
-      ? paths.some((path) => filePath.startsWith(path))
-      : true;
-
-  if (yamlParse) {
-    const isInYamlFilter: null | undefined = filePath
-      .split("/")
-      .reduce((yaml, chunk) => yaml?.[chunk], yamlParse);
-    return isInYamlFilter === null && pathAllowed;
-  } else if (!pathAllowed) {
-    return false;
-  }
-
-  if (includeDir && !includeDir.some((d) => filePath.slice(1).startsWith(d)))
-    return false;
-  if (excludeDir && excludeDir.some((d) => filePath.slice(1).startsWith(d)))
-    return false;
-
-  return true;
+  return { type: "markdown" };
 }
 
-function isValidUtf8(data: Uint8Array): boolean {
-  try {
-    const decoder = new TextDecoder("utf-8", { fatal: true });
-    decoder.decode(data);
-    return true;
-  } catch {
-    return false;
+// ==================== REPO ACCESS ====================
+
+async function checkRepoAccess(
+  owner: string,
+  repo: string,
+  token?: string | null,
+): Promise<RepoAccess> {
+  const headers: HeadersInit = {
+    Accept: "application/vnd.github.v3+json",
+    "User-Agent": "uithub",
+  };
+  if (token) headers["Authorization"] = `token ${token}`;
+  const response = await fetch(
+    `https://api.github.com/repos/${owner}/${repo}`,
+    { headers },
+  );
+  if (response.status === 404) {
+    return { exists: false, isPrivate: true };
   }
+  if (!response.ok) {
+    return { exists: false, isPrivate: false };
+  }
+  const data = (await response.json()) as any;
+  return {
+    exists: true,
+    isPrivate: data.private || false,
+    default_branch: data.default_branch,
+  };
 }
 
-async function calculateHash(data: Uint8Array): Promise<string> {
-  const hashBuffer = await crypto.subtle.digest("SHA-256", data);
-  return Array.from(new Uint8Array(hashBuffer))
-    .map((b) => b.toString(16).padStart(2, "0"))
-    .join("");
-}
+// ==================== TREE AND FILE STRING BUILDING ====================
 
-function addLineNumbers(
-  content: string,
+function stringifyFileContent(
+  path: string,
+  item: ContentType,
   shouldAddLineNumbers: boolean,
 ): string {
-  if (!shouldAddLineNumbers) return content;
-  const lines = content.split("\n");
-  const totalLines = lines.length;
-  const totalCharacters = String(totalLines).length;
-  return lines
-    .map((line, index) => {
-      const lineNum = index + 1;
-      const spacesNeeded = totalCharacters - String(lineNum).length;
-      return " ".repeat(spacesNeeded) + String(lineNum) + " | " + line;
-    })
-    .join("\n");
-}
-
-function calculateFileTokens(
-  path: string,
-  content: string,
-  shouldAddLineNumbers: boolean,
-): number {
-  const processed = addLineNumbers(content, shouldAddLineNumbers);
-  const fileString = `${path}:\n${"-".repeat(
+  const contentOrUrl =
+    item.type === "content"
+      ? addLineNumbers(item.content || "", shouldAddLineNumbers)
+      : item.type === "binary"
+      ? item.url
+      : "";
+  return `${path}:\n${"-".repeat(80)}\n${contentOrUrl}\n\n\n${"-".repeat(
     80,
-  )}\n${processed}\n\n\n${"-".repeat(80)}\n`;
-  return Math.ceil(fileString.length / CHARACTERS_PER_TOKEN);
+  )}\n`;
 }
 
-function calculateFileLines(content: string): number {
-  return content.split("\n").length;
-}
+function buildTreeAndFileString(
+  result: { [path: string]: ContentType },
+  shouldOmitFiles: boolean,
+  shouldAddLineNumbers: boolean,
+): {
+  tree: NestedObject<null>;
+  fileString: string;
+  tokens: number;
+  treeTokens: number;
+} {
+  const tree = filePathToNestedObject({ ...result }, () => null);
+  const treeString = nestedObjectToTreeString(tree);
+  const treeTokens = Math.round(treeString.length / CHARACTERS_PER_TOKEN);
 
-// ==================== STREAMING ZIP PROCESSOR ====================
+  const filePart = shouldOmitFiles
+    ? ""
+    : Object.keys(result)
+        .map((path) =>
+          stringifyFileContent(path, result[path], shouldAddLineNumbers),
+        )
+        .join("");
 
-async function parseZipStreaming(
-  stream: ReadableStream<Uint8Array>,
-  context: StreamingParseContext,
-): Promise<{
-  status: number;
-  result?: { [path: string]: ContentType };
-  allPaths?: string[];
-  shaOrBranch?: string;
-  message?: string;
-  totalTokens: number;
-  totalLines: number;
-  usedTokens: number;
-}> {
-  const {
-    owner,
-    repo,
-    branch,
-    excludeExt,
-    includeExt,
-    paths,
-    includeDir,
-    excludeDir,
-    disableGenignore,
-    maxFileSize,
-    yamlFilter,
-    matchFilenames,
-    maxTokens,
-    shouldAddLineNumbers,
-  } = context;
+  const fileString = treeString + (shouldOmitFiles ? "" : "\n\n" + filePart);
+  const tokens = Math.round(
+    (treeString + "\n\n" + filePart).length / CHARACTERS_PER_TOKEN,
+  );
 
-  let yamlParse: any;
-  try {
-    if (yamlFilter) {
-      yamlParse = parseYaml(yamlFilter);
-    }
-  } catch (e: any) {
-    return {
-      status: 500,
-      message:
-        "Couldn't parse yaml filter. Please ensure to provide valid url-encoded YAML. " +
-        e.message,
-      totalTokens: 0,
-      totalLines: 0,
-      usedTokens: 0,
-    };
-  }
-
-  const shaOrBranch = branch || "HEAD";
-  const zipReader = new StreamingZipReader(stream);
-
-  const allFiles: Map<string, { data: Uint8Array; isText: boolean }> =
-    new Map();
-  const allPaths: string[] = [];
-  let genignoreContent: string | null = DEFAULT_GENIGNORE;
-
-  try {
-    for await (const entry of zipReader.entries()) {
-      if (entry.fileName.endsWith("/")) continue;
-
-      const filePath = entry.fileName.split("/").slice(1).join("/");
-      if (!filePath) continue;
-
-      allPaths.push(filePath);
-
-      if (filePath === ".genignore" && !disableGenignore) {
-        const data = await entry.getData();
-        if (data && isValidUtf8(data)) {
-          genignoreContent = new TextDecoder("utf-8").decode(data);
-        }
-        continue;
-      }
-
-      if (
-        !shouldIncludeFile({
-          matchFilenames,
-          filePath,
-          yamlParse,
-          includeExt,
-          excludeExt,
-          includeDir,
-          excludeDir,
-          paths,
-        })
-      ) {
-        await entry.getData();
-        continue;
-      }
-
-      const data = await entry.getData();
-      if (!data) continue;
-
-      const isText = isValidUtf8(data);
-
-      if (isText && maxFileSize && data.length > maxFileSize) {
-        continue;
-      }
-
-      allFiles.set(filePath, { data, isText });
-    }
-  } catch (e) {
-    // Stream might have ended early, continue with what we have
-  }
-
-  const genignore =
-    genignoreContent && !disableGenignore
-      ? compileGitignore(genignoreContent)
-      : undefined;
-
-  const processedFiles: ProcessedFile[] = [];
-  let totalTokens = 0;
-  let totalLines = 0;
-
-  for (const [filePath, { data, isText }] of allFiles) {
-    if (genignore && !genignore.accepts(filePath)) {
-      continue;
-    }
-
-    const hash = await calculateHash(data);
-
-    if (isText) {
-      const content = new TextDecoder("utf-8").decode(data);
-      const tokens = calculateFileTokens(
-        "/" + filePath,
-        content,
-        shouldAddLineNumbers,
-      );
-      const lines = calculateFileLines(content);
-
-      processedFiles.push({
-        path: "/" + filePath,
-        content: {
-          type: "content",
-          content,
-          hash,
-          size: data.length,
-          url: undefined,
-        },
-        tokens,
-        lines,
-      });
-
-      totalTokens += tokens;
-      totalLines += lines;
-    } else {
-      const tokens = Math.ceil(
-        (
-          `/${filePath}:\n` +
-          "-".repeat(80) +
-          `\nhttps://raw.githubusercontent.com/${owner}/${repo}/${shaOrBranch}/${filePath}\n\n\n` +
-          "-".repeat(80) +
-          "\n"
-        ).length / CHARACTERS_PER_TOKEN,
-      );
-
-      processedFiles.push({
-        path: "/" + filePath,
-        content: {
-          type: "binary",
-          content: undefined,
-          hash,
-          size: data.length,
-          url: `https://raw.githubusercontent.com/${owner}/${repo}/${shaOrBranch}/${filePath}`,
-        },
-        tokens,
-        lines: 1,
-      });
-
-      totalTokens += tokens;
-      totalLines += 1;
-    }
-  }
-
-  processedFiles.sort((a, b) => a.tokens - b.tokens);
-
-  const result: { [path: string]: ContentType } = {};
-  let usedTokens = 0;
-
-  for (const file of processedFiles) {
-    if (usedTokens + file.tokens <= maxTokens) {
-      result[file.path] = file.content;
-      usedTokens += file.tokens;
-    }
-  }
-
-  return {
-    status: 200,
-    result,
-    allPaths,
-    shaOrBranch,
-    totalTokens,
-    totalLines,
-    usedTokens,
-  };
+  return { tree, fileString, tokens, treeTokens };
 }
 
 // ==================== MODAL HTML GENERATION ====================
 
-function generateModalHTML(
-  state: ModalState,
-  context: {
-    loginUrl: string;
-    privateAccessUrl: string;
-    paymentLink: string | null;
-    credit: number;
-    username?: string;
-    profilePicture?: string;
-  },
-): string {
+function generateModalHTML(state: ModalState, context: ModalContext): string {
   if (!state) return "";
 
   const {
@@ -963,14 +590,7 @@ function generateViewHTML(context: {
   description: string;
   default_branch?: string;
   modalState: ModalState;
-  modalContext: {
-    loginUrl: string;
-    privateAccessUrl: string;
-    paymentLink: string | null;
-    credit: number;
-    username?: string;
-    profilePicture?: string;
-  };
+  modalContext: ModalContext;
 }): string {
   const {
     description,
@@ -1286,10 +906,11 @@ function generateViewHTML(context: {
         url.searchParams.delete('accept');
       }
       
-      if (maxTokens) {
+      if (maxTokens && maxTokens.trim() !== '') {
         url.searchParams.set('maxTokens', maxTokens);
       } else {
-        url.searchParams.delete('maxTokens');
+        // Set to large default instead of deleting
+        url.searchParams.set('maxTokens', '10000000'); 
       }
       
       if (ext) {
@@ -1378,78 +999,229 @@ function generateViewHTML(context: {
 </html>`;
 }
 
-// ==================== CHECK REPO ACCESS ====================
+// ==================== RESPONSE BUILDERS ====================
 
-async function checkRepoAccess(
-  owner: string,
-  repo: string,
-  token?: string | null,
-): Promise<{ exists: boolean; isPrivate: boolean; default_branch?: string }> {
-  const headers: HeadersInit = {
-    Accept: "application/vnd.github.v3+json",
-    "User-Agent": "uithub",
-  };
-  if (token) headers["Authorization"] = `token ${token}`;
-  const response = await fetch(
-    `https://api.github.com/repos/${owner}/${repo}`,
-    { headers },
-  );
-  if (response.status === 404) {
-    return { exists: false, isPrivate: true };
+function buildUnauthorizedResponse(
+  modalState: ModalState,
+  url: URL,
+  modalContext: ModalContext,
+): Response {
+  if (modalState === "login_required") {
+    return createUnauthorizedResponse(url, "read");
+  } else if (modalState === "private_access_required") {
+    return new Response(
+      "Private repository access required. Please authenticate with 'repo' scope.",
+      {
+        status: 403,
+        headers: {
+          "WWW-Authenticate": `Bearer realm="${url.hostname}", resource_metadata="${url.origin}/.well-known/oauth-protected-resource", scope="repo"`,
+        },
+      },
+    );
+  } else {
+    return new Response(
+      `Insufficient credit. Balance: $${(
+        (modalContext.credit || 0) / 100
+      ).toFixed(2)}. Required: $0.01`,
+      { status: 402 },
+    );
   }
-  if (!response.ok) {
-    return { exists: false, isPrivate: false };
-  }
-  const data = (await response.json()) as any;
-  return {
-    exists: true,
-    isPrivate: data.private || false,
-    default_branch: data.default_branch,
-  };
 }
 
-// ==================== DETERMINE RESPONSE FORMAT ====================
+function buildPlaceholderHtmlResponse(context: {
+  url: URL;
+  owner: string;
+  repo: string;
+  branch?: string;
+  path: string;
+  repoAccess: RepoAccess;
+  modalState: ModalState;
+  modalContext: ModalContext;
+}): Response {
+  const {
+    url,
+    owner,
+    repo,
+    branch,
+    path,
+    repoAccess,
+    modalState,
+    modalContext,
+  } = context;
 
-function determineResponseFormat(request: Request, url: URL): ResponseFormat {
-  const acceptParam = url.searchParams.get("accept");
-  const acceptHeader = request.headers.get("Accept") || "";
+  const placeholderFileString =
+    modalState === "login_required"
+      ? "Content hidden. Please sign in to continue."
+      : "Content hidden. Please complete the required steps first.";
+  const placeholderTree = {};
 
-  if (acceptParam) {
-    if (acceptParam === "application/json") {
-      return { type: "json" };
-    }
-    if (acceptParam === "text/yaml") {
-      return { type: "yaml" };
-    }
-    if (acceptParam === "text/plain" || acceptParam === "text/markdown") {
-      return { type: "markdown" };
-    }
+  const branchPart = branch ? ` at ${branch}` : "";
+  const title = `${owner}/${repo} - uithub`;
+  const description = `LLM context for ${repo}. /${path}${branchPart}`;
+
+  const viewHtml = generateViewHTML({
+    url,
+    title,
+    description,
+    fileString: placeholderFileString,
+    tokens: 0,
+    totalTokens: 0,
+    totalLines: 0,
+    tree: placeholderTree,
+    default_branch: repoAccess.default_branch,
+    modalState,
+    modalContext,
+  });
+
+  return new Response(viewHtml, {
+    headers: {
+      "Content-Type": "text/html",
+      "X-XSS-Protection": "1; mode=block",
+      "X-Content-Type-Options": "nosniff",
+      "X-Frame-Options": "DENY",
+    },
+  });
+}
+
+async function fetchAndProcessRepo(
+  owner: string,
+  repo: string,
+  branch: string | undefined,
+  path: string,
+  githubAccessToken: string | null,
+  repoAccess: RepoAccess,
+  params: RepoRequestParams,
+): Promise<{
+  status: number;
+  result?: { [path: string]: ContentType };
+  allPaths?: string[];
+  shaOrBranch?: string;
+  message?: string;
+  totalTokens: number;
+  totalLines: number;
+  usedTokens: number;
+}> {
+  const ref = branch && branch !== "" ? branch : "HEAD";
+  const isPrivate = !!githubAccessToken && repoAccess.isPrivate;
+  const branchSuffix = branch && branch !== "" ? `/${branch}` : "";
+  const apiUrl = isPrivate
+    ? `https://api.github.com/repos/${owner}/${repo}/zipball${branchSuffix}`
+    : `https://github.com/${owner}/${repo}/archive/${ref}.zip`;
+
+  const headers: HeadersInit = isPrivate
+    ? { Authorization: `token ${githubAccessToken}` }
+    : {};
+  headers["User-Agent"] = "uithub";
+
+  const response = await fetch(apiUrl, { headers });
+  if (!response.ok || !response.body) {
+    return {
+      status: response.status,
+      message: `Failed to fetch repository: ${response.status}`,
+      totalTokens: 0,
+      totalLines: 0,
+      usedTokens: 0,
+    };
   }
 
-  if (acceptHeader === "*/*" || acceptHeader === "") {
-    return { type: "markdown" };
+  const parseContext: StreamingParseContext = {
+    owner,
+    repo,
+    branch,
+    excludeDir: params.excludeDir,
+    excludeExt: params.excludeExt,
+    includeDir: params.includeDir,
+    includeExt: params.includeExt,
+    yamlFilter: params.yamlFilter,
+    matchFilenames: params.matchFilenames,
+    paths: path ? [path] : undefined,
+    disableGenignore: params.disableGenignore,
+    maxFileSize: params.maxFileSize,
+    maxTokens: params.maxTokens,
+    shouldAddLineNumbers: params.shouldAddLineNumbers,
+  };
+
+  return await parseZipStreaming(response.body, parseContext);
+}
+
+function buildSuccessResponse(
+  format: ResponseFormat,
+  result: {
+    result: { [path: string]: ContentType };
+    totalTokens: number;
+    totalLines: number;
+    shaOrBranch?: string;
+  },
+  params: RepoRequestParams,
+  url: URL,
+  owner: string,
+  repo: string,
+  branch: string | undefined,
+  path: string,
+  repoAccess: RepoAccess,
+  modalContext: ModalContext,
+): Response {
+  const { tree, fileString, tokens, treeTokens } = buildTreeAndFileString(
+    result.result,
+    params.shouldOmitFiles,
+    params.shouldAddLineNumbers,
+  );
+
+  if (format.type === "html") {
+    const branchPart = branch ? ` at ${branch}` : "";
+    const title = `${owner}/${repo} - uithub`;
+    const description = `LLM context for ${repo}. /${path}${branchPart} contains ${tokens} tokens.`;
+
+    const viewHtml = generateViewHTML({
+      url,
+      title,
+      description,
+      fileString,
+      tokens,
+      totalTokens: result.totalTokens + treeTokens,
+      totalLines: result.totalLines,
+      tree,
+      default_branch: result.shaOrBranch || repoAccess.default_branch,
+      modalState: null,
+      modalContext,
+    });
+
+    return new Response(viewHtml, {
+      headers: {
+        "Content-Type": "text/html",
+        "X-XSS-Protection": "1; mode=block",
+        "X-Content-Type-Options": "nosniff",
+        "X-Frame-Options": "DENY",
+      },
+    });
   }
 
-  if (acceptHeader.includes("text/html")) {
-    return { type: "html" };
+  if (format.type === "markdown") {
+    return new Response(fileString, {
+      headers: { "Content-Type": "text/markdown; charset=utf-8" },
+    });
   }
 
-  if (acceptHeader.includes("application/json")) {
-    return { type: "json" };
+  const body = {
+    size: {
+      tokens,
+      totalTokens: result.totalTokens + treeTokens,
+      characters: (result.totalTokens + treeTokens) * CHARACTERS_PER_TOKEN,
+      lines: result.totalLines,
+    },
+    tree: params.shouldOmitTree ? undefined : tree,
+    files: params.shouldOmitFiles ? undefined : result.result,
+  };
+
+  if (format.type === "yaml") {
+    return new Response(stringify(body), {
+      headers: { "Content-Type": "text/yaml" },
+    });
   }
 
-  if (acceptHeader.includes("text/yaml")) {
-    return { type: "yaml" };
-  }
-
-  if (
-    acceptHeader.includes("text/plain") ||
-    acceptHeader.includes("text/markdown")
-  ) {
-    return { type: "markdown" };
-  }
-
-  return { type: "markdown" };
+  return new Response(JSON.stringify(body, undefined, 2), {
+    headers: { "Content-Type": "application/json" },
+  });
 }
 
 // ==================== MAIN HANDLER ====================
@@ -1462,242 +1234,88 @@ export async function handleRepoEndpoint(
   const [_, owner, repo, page, branch, ...pathParts] = url.pathname.split("/");
   const path = pathParts.join("/");
 
-  // Get authentication
   const { currentUser, githubAccessToken, sessionScopes } = await getUser(
     request,
     env,
   );
-
   const responseFormat = determineResponseFormat(request, url);
 
-  // Repository content - authentication required
-  if (!currentUser) {
-    if (responseFormat.type === "html") {
-      const loginUrl = `${
-        url.origin
-      }/login?scope=user:email&resource=${encodeURIComponent(
-        url.origin,
-      )}&redirect_to=${encodeURIComponent(url.pathname + url.search)}`;
-      const privateAccessUrl = `${
-        url.origin
-      }/login?scope=repo&resource=${encodeURIComponent(
-        url.origin,
-      )}&redirect_to=${encodeURIComponent(url.pathname + url.search)}`;
+  // Check repo access
+  const repoAccess = await checkRepoAccess(owner, repo, githubAccessToken);
+  const userAccount = currentUser
+    ? await getUserAccount(String(currentUser.id), env)
+    : null;
 
-      const modalContext = {
-        loginUrl,
-        privateAccessUrl,
-        paymentLink: null,
-        credit: 0,
-        username: undefined,
-        profilePicture: undefined,
-      };
+  // Build modal context
+  const { loginUrl, privateAccessUrl, paymentLink } = buildModalContextUrls(
+    url,
+    env,
+    currentUser,
+  );
+  const modalContext: ModalContext = {
+    loginUrl,
+    privateAccessUrl,
+    paymentLink,
+    credit: userAccount?.credit || 0,
+    username: currentUser?.login,
+    profilePicture: currentUser?.avatar_url,
+  };
 
-      const placeholderFileString =
-        "Content hidden. Please sign in to continue.";
-      const placeholderTree = {};
+  // Determine modal state
+  const modalState = determineModalState(
+    currentUser,
+    sessionScopes,
+    userAccount,
+    repoAccess,
+  );
 
-      const branchPart = branch ? ` at ${branch}` : "";
-      const title = `${owner}/${repo} - uithub`;
-      const description = `LLM context for ${repo}. /${path}${branchPart}`;
-
-      const viewHtml = generateViewHTML({
-        url,
-        title,
-        description,
-        fileString: placeholderFileString,
-        tokens: 0,
-        totalTokens: 0,
-        totalLines: 0,
-        tree: placeholderTree,
-        default_branch: undefined,
-        modalState: "login_required",
-        modalContext,
-      });
-
-      return new Response(viewHtml, {
-        headers: {
-          "Content-Type": "text/html",
-          "X-XSS-Protection": "1; mode=block",
-          "X-Content-Type-Options": "nosniff",
-          "X-Frame-Options": "DENY",
-        },
-      });
-    } else {
-      return createUnauthorizedResponse(url, "read");
-    }
+  // Handle unauthorized states
+  if (modalState && responseFormat.type !== "html") {
+    return buildUnauthorizedResponse(modalState, url, modalContext);
   }
 
-  // User is authenticated, check repo access
-  try {
-    const repoAccess = await checkRepoAccess(owner, repo, githubAccessToken);
-
-    const loginUrl = `${
-      url.origin
-    }/login?scope=user:email&resource=${encodeURIComponent(
-      url.origin,
-    )}&redirect_to=${encodeURIComponent(url.pathname + url.search)}`;
-    const privateAccessUrl = `${
-      url.origin
-    }/login?scope=repo&resource=${encodeURIComponent(
-      url.origin,
-    )}&redirect_to=${encodeURIComponent(url.pathname + url.search)}`;
-
-    let userAccount: UserAccount | null = null;
-    if (currentUser) {
-      userAccount = await getUserAccount(String(currentUser.id), env);
-    }
-
-    const paymentLink = currentUser
-      ? `${env.STRIPE_PAYMENT_LINK}?client_reference_id=${currentUser.id}`
-      : null;
-
-    const modalContext = {
-      loginUrl,
-      privateAccessUrl,
-      paymentLink,
-      credit: userAccount?.credit || 0,
-      username: currentUser?.login,
-      profilePicture: currentUser?.avatar_url,
-    };
-
-    let modalState: ModalState = null;
-
-    if (!repoAccess.exists || repoAccess.isPrivate) {
-      if (!sessionScopes.includes("repo")) {
-        if (responseFormat.type === "html") {
-          modalState = "private_access_required";
-        } else {
-          return new Response(
-            "Private repository access required. Please authenticate with 'repo' scope.",
-            {
-              status: 403,
-              headers: {
-                "WWW-Authenticate": `Bearer realm="${url.hostname}", resource_metadata="${url.origin}/.well-known/oauth-protected-resource", scope="repo"`,
-              },
-            },
-          );
-        }
-      } else if (!userAccount || userAccount.credit < PRIVATE_REPO_COST_CENTS) {
-        if (responseFormat.type === "html") {
-          modalState = "credit_required";
-        } else {
-          return new Response(
-            `Insufficient credit. Balance: $${(
-              (userAccount?.credit || 0) / 100
-            ).toFixed(2)}. Required: $0.01`,
-            { status: 402 },
-          );
-        }
-      } else {
-        const chargeResult = await chargeForPrivateRepo(
-          String(currentUser.id),
-          env,
-        );
-        if (!chargeResult.success) {
-          if (responseFormat.type === "html") {
-            modalState = "credit_required";
-          } else {
-            return new Response(chargeResult.message, { status: 402 });
-          }
-        }
-      }
-    }
-
-    if (modalState && responseFormat.type === "html") {
-      const placeholderFileString =
-        "Content hidden. Please complete the required steps first.";
-      const placeholderTree = {};
-
-      const branchPart = branch ? ` at ${branch}` : "";
-      const title = `${owner}/${repo} - uithub`;
-      const description = `LLM context for ${repo}. /${path}${branchPart}`;
-
-      const viewHtml = generateViewHTML({
-        url,
-        title,
-        description,
-        fileString: placeholderFileString,
-        tokens: 0,
-        totalTokens: 0,
-        totalLines: 0,
-        tree: placeholderTree,
-        default_branch: repoAccess.default_branch,
-        modalState,
-        modalContext,
-      });
-
-      return new Response(viewHtml, {
-        headers: {
-          "Content-Type": "text/html",
-          "X-XSS-Protection": "1; mode=block",
-          "X-Content-Type-Options": "nosniff",
-          "X-Frame-Options": "DENY",
-        },
-      });
-    }
-
-    // Parse query params
-    const maxTokensParam = url.searchParams.get("maxTokens");
-    const shouldAddLineNumbers = url.searchParams.get("lines") !== "false";
-    const includeExt = url.searchParams.get("ext")?.split(",");
-    const includeDir = url.searchParams.get("dir")?.split(",");
-    const excludeExt = url.searchParams.get("exclude-ext")?.split(",");
-    const excludeDir = url.searchParams.get("exclude-dir")?.split(",");
-    const disableGenignore =
-      url.searchParams.get("disableGenignore") === "true";
-    const maxFileSize =
-      parseInt(url.searchParams.get("maxFileSize") || "0", 10) || undefined;
-    const yamlFilter = url.searchParams.get("yamlFilter") || undefined;
-    const shouldOmitFiles = url.searchParams.get("omitFiles") === "true";
-    const shouldOmitTree = url.searchParams.get("omitTree") === "true";
-    const matchFilenames = url.searchParams
-      .get("matchFilenames")
-      ?.split(",")
-      .map((x) => x.trim())
-      .filter(Boolean);
-
-    const maxTokens =
-      maxTokensParam && !isNaN(Number(maxTokensParam))
-        ? Number(maxTokensParam)
-        : DEFAULT_MAX_TOKENS;
-
-    // Fetch from GitHub
-    const ref = branch && branch !== "" ? branch : "HEAD";
-    const isPrivate = !!githubAccessToken && repoAccess.isPrivate;
-    const branchSuffix = branch && branch !== "" ? `/${branch}` : "";
-    const apiUrl = isPrivate
-      ? `https://api.github.com/repos/${owner}/${repo}/zipball${branchSuffix}`
-      : `https://github.com/${owner}/${repo}/archive/${ref}.zip`;
-    const headers: HeadersInit = isPrivate
-      ? { Authorization: `token ${githubAccessToken}` }
-      : {};
-    headers["User-Agent"] = "uithub";
-
-    const response = await fetch(apiUrl, { headers });
-    if (!response.ok || !response.body) {
-      return new Response(`Failed to fetch repository: ${response.status}`, {
-        status: response.status,
-      });
-    }
-
-    // Stream-parse ZIP
-    const result = await parseZipStreaming(response.body, {
+  // If HTML and modal state, show placeholder
+  if (modalState && responseFormat.type === "html") {
+    return buildPlaceholderHtmlResponse({
+      url,
       owner,
       repo,
       branch,
-      excludeDir,
-      excludeExt,
-      includeDir,
-      includeExt,
-      yamlFilter,
-      matchFilenames,
-      paths: path ? [path] : undefined,
-      disableGenignore,
-      maxFileSize,
-      maxTokens,
-      shouldAddLineNumbers,
+      path,
+      repoAccess,
+      modalState,
+      modalContext,
     });
+  }
+
+  // Charge for private repo access
+  if (
+    (!repoAccess.exists || repoAccess.isPrivate) &&
+    userAccount &&
+    sessionScopes.includes("repo")
+  ) {
+    const chargeResult = await chargeForPrivateRepo(
+      String(currentUser.id),
+      env,
+    );
+    if (!chargeResult.success) {
+      return new Response(chargeResult.message, { status: 402 });
+    }
+  }
+
+  // Fetch and process repo
+  const params = parseRepoRequestParams(url);
+
+  try {
+    const result = await fetchAndProcessRepo(
+      owner,
+      repo,
+      branch,
+      path,
+      githubAccessToken,
+      repoAccess,
+      params,
+    );
 
     if (!result.result) {
       return new Response(result.message || "Error processing repository", {
@@ -1705,89 +1323,19 @@ export async function handleRepoEndpoint(
       });
     }
 
-    // Build tree
-    const tree = filePathToNestedObject({ ...result.result }, () => null);
-    const treeString = nestedObjectToTreeString(tree);
-    const treeTokens = Math.round(treeString.length / CHARACTERS_PER_TOKEN);
-
-    const stringifyFileContent = (path: string) => {
-      const item = result.result![path] as any;
-      const contentOrUrl =
-        item.type === "content"
-          ? addLineNumbers(item.content, shouldAddLineNumbers)
-          : item.type === "binary"
-          ? item.url
-          : "";
-      return `${path}:\n${"-".repeat(80)}\n${contentOrUrl}\n\n\n${"-".repeat(
-        80,
-      )}\n`;
-    };
-
-    const filePart = Object.keys(result.result)
-      .map(stringifyFileContent)
-      .join("");
-    const fileString = treeString + (shouldOmitFiles ? "" : "\n\n" + filePart);
-    const tokens = Math.round(
-      (treeString + "\n\n" + filePart).length / CHARACTERS_PER_TOKEN,
+    // Build and return response
+    return buildSuccessResponse(
+      responseFormat,
+      result as any,
+      params,
+      url,
+      owner,
+      repo,
+      branch,
+      path,
+      repoAccess,
+      modalContext,
     );
-
-    // Return based on format
-    if (responseFormat.type === "html") {
-      const branchPart = branch ? ` at ${branch}` : "";
-      const title = `${owner}/${repo} - uithub`;
-      const description = `LLM context for ${repo}. /${path}${branchPart} contains ${tokens} tokens.`;
-
-      const viewHtml = generateViewHTML({
-        url,
-        title,
-        description,
-        fileString,
-        tokens,
-        totalTokens: result.totalTokens + treeTokens,
-        totalLines: result.totalLines,
-        tree,
-        default_branch: result.shaOrBranch || repoAccess.default_branch,
-        modalState: null,
-        modalContext,
-      });
-
-      return new Response(viewHtml, {
-        headers: {
-          "Content-Type": "text/html",
-          "X-XSS-Protection": "1; mode=block",
-          "X-Content-Type-Options": "nosniff",
-          "X-Frame-Options": "DENY",
-        },
-      });
-    }
-
-    if (responseFormat.type === "markdown") {
-      return new Response(fileString, {
-        headers: { "Content-Type": "text/markdown; charset=utf-8" },
-      });
-    }
-
-    // JSON/YAML response
-    const body = {
-      size: {
-        tokens,
-        totalTokens: result.totalTokens + treeTokens,
-        characters: (result.totalTokens + treeTokens) * CHARACTERS_PER_TOKEN,
-        lines: result.totalLines,
-      },
-      tree: shouldOmitTree ? undefined : tree,
-      files: shouldOmitFiles ? undefined : result.result,
-    };
-
-    if (responseFormat.type === "yaml") {
-      return new Response(stringify(body), {
-        headers: { "Content-Type": "text/yaml" },
-      });
-    }
-
-    return new Response(JSON.stringify(body, undefined, 2), {
-      headers: { "Content-Type": "application/json" },
-    });
   } catch (e: any) {
     return new Response(`Error: ${e.message}`, { status: 500 });
   }
