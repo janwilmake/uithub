@@ -427,7 +427,7 @@ export async function handleDashboard(
       const formData = await request.formData();
       const name = formData.get("name")?.toString() || "Unnamed Key";
       await createApiKey(userId, name, env);
-      return Response.redirect(url.origin + "/dashboard", 303);
+      return Response.redirect("/dashboard", 303);
     }
 
     if (url.pathname === "/dashboard/api-keys/delete") {
@@ -436,7 +436,7 @@ export async function handleDashboard(
       if (keyId) {
         await deleteApiKey(userId, keyId, env);
       }
-      return Response.redirect(url.origin + "/dashboard", 303);
+      return Response.redirect("/dashboard", 303);
     }
 
     if (url.pathname === "/dashboard/clients/revoke") {
@@ -445,7 +445,7 @@ export async function handleDashboard(
       if (clientId) {
         await revokeClientAccess(userId, clientId, env);
       }
-      return Response.redirect(url.origin + "/dashboard", 303);
+      return Response.redirect("/dashboard", 303);
     }
   }
 
