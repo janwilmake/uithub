@@ -74,6 +74,8 @@ async function createApiKey(
   };
   apiKeys.push(newKey);
   await setUserApiKeys(userId, apiKeys, env);
+  // Store direct key lookup for auth validation
+  await env.KV.put(`api_key_${newKey.key}`, userId);
   return newKey;
 }
 
@@ -83,9 +85,12 @@ async function deleteApiKey(
   env: Env,
 ): Promise<boolean> {
   const apiKeys = await getUserApiKeys(userId, env);
+  const keyToDelete = apiKeys.find((k) => k.id === keyId);
+  if (!keyToDelete) return false;
   const filtered = apiKeys.filter((k) => k.id !== keyId);
-  if (filtered.length === apiKeys.length) return false;
   await setUserApiKeys(userId, filtered, env);
+  // Remove direct key lookup
+  await env.KV.delete(`api_key_${keyToDelete.key}`);
   return true;
 }
 
@@ -183,6 +188,25 @@ function generateDashboardHTML(context: {
     }
     .logout-btn:hover {
       background: rgba(239, 68, 68, 0.2);
+    }
+    .header-links {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+    }
+    .api-docs-btn {
+      background: rgba(139, 92, 246, 0.1);
+      border: 1px solid rgba(139, 92, 246, 0.3);
+      color: #8b5cf6;
+      padding: 10px 20px;
+      border-radius: 8px;
+      cursor: pointer;
+      text-decoration: none;
+      display: inline-block;
+      transition: all 0.2s;
+    }
+    .api-docs-btn:hover {
+      background: rgba(139, 92, 246, 0.2);
     }
     .section {
       background: #2a2a2a;
@@ -306,7 +330,10 @@ function generateDashboardHTML(context: {
           <p>Dashboard</p>
         </div>
       </div>
-      <a href="${logoutUrl}" class="logout-btn">Logout</a>
+      <div class="header-links">
+        <a href="/openapi.html" class="api-docs-btn">API Docs</a>
+        <a href="${logoutUrl}" class="logout-btn">Logout</a>
+      </div>
     </div>
 
     <div class="section">
@@ -427,7 +454,7 @@ export async function handleDashboard(
       const formData = await request.formData();
       const name = formData.get("name")?.toString() || "Unnamed Key";
       await createApiKey(userId, name, env);
-      return Response.redirect("/dashboard", 303);
+      return Response.redirect(url.origin + "/dashboard", 303);
     }
 
     if (url.pathname === "/dashboard/api-keys/delete") {
@@ -436,7 +463,7 @@ export async function handleDashboard(
       if (keyId) {
         await deleteApiKey(userId, keyId, env);
       }
-      return Response.redirect("/dashboard", 303);
+      return Response.redirect(url.origin + "/dashboard", 303);
     }
 
     if (url.pathname === "/dashboard/clients/revoke") {
@@ -445,7 +472,7 @@ export async function handleDashboard(
       if (clientId) {
         await revokeClientAccess(userId, clientId, env);
       }
-      return Response.redirect("/dashboard", 303);
+      return Response.redirect(url.origin + "/dashboard", 303);
     }
   }
 

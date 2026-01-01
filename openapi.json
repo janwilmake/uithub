@@ -4,12 +4,12 @@
 
   "openapi": "3.1.0",
   "info": {
-    "title": "UIThub API",
+    "title": "uithub API",
     "version": "1.1.0",
-    "description": "API for fetching repository contents and related information from GitHub"
+    "description": "API for fetching repository contents and related information from GitHub\n\nCheck <a href=\"openapi.json\">openapi.json</a> to get this in machine readable format"
   },
   "servers": [{ "url": "https://uithub.com" }],
-  "security": [{}, { "bearerAuth": [] }],
+  "security": [{ "bearerAuth": [] }],
   "paths": {
     "/{owner}/{repo}/tree/{branch}/{path}": {
       "get": {

@@ -1,3 +1,7 @@
+//@ts-check
+/// <reference lib="esnext" />
+/// <reference types="@cloudflare/workers-types" />
+
 /**
  * AUTH.TS - Authentication and OAuth 2.0 Implementation
  *
@@ -76,6 +80,14 @@ export interface AccessToken {
   scopes: string;
   expires_at: number;
   resource?: string;
+}
+
+interface ClientAccess {
+  client_id: string;
+  client_name: string;
+  created_at: number;
+  last_used?: number;
+  scopes: string;
 }
 
 interface OAuthState {
@@ -579,6 +591,30 @@ async function handleToken(request: Request, env: Env): Promise<Response> {
 
   await storeAccessToken(tokenData, env);
 
+  // Store client access for dashboard display
+  const clientAccessKey = `user_client_access_${authCode.user_id}`;
+  const existingAccess =
+    ((await env.KV.get(clientAccessKey, "json")) as ClientAccess[]) || [];
+  const existingIndex = existingAccess.findIndex(
+    (c) => c.client_id === clientId,
+  );
+
+  if (existingIndex !== -1) {
+    // Update existing entry
+    existingAccess[existingIndex].last_used = Date.now();
+    existingAccess[existingIndex].scopes = authCode.scopes;
+  } else {
+    // Add new entry
+    existingAccess.push({
+      client_id: clientId,
+      client_name: client.client_name,
+      created_at: Date.now(),
+      scopes: authCode.scopes,
+    });
+  }
+
+  await env.KV.put(clientAccessKey, JSON.stringify(existingAccess));
+
   return Response.json({
     access_token: accessToken,
     token_type: "Bearer",
@@ -880,19 +916,48 @@ export const getUser = async (request: Request, env: Env) => {
   let sessionScopes: string = "";
 
   if (bearerToken) {
-    const tokenData = await getAccessTokenData(bearerToken, env);
-    if (tokenData && Date.now() < tokenData.expires_at) {
-      githubAccessToken = tokenData.github_access_token;
-      const userResponse = await fetch("https://api.github.com/user", {
-        headers: {
-          Authorization: `Bearer ${githubAccessToken}`,
-          Accept: "application/vnd.github.v3+json",
-          "User-Agent": "uithub",
-        },
-      });
-      if (userResponse.ok) {
-        currentUser = await userResponse.json();
-        sessionScopes = tokenData.scopes;
+    // Check for dashboard-created API keys (uitk_ prefix)
+    if (bearerToken.startsWith("uitk_")) {
+      const userId = await env.KV.get(`api_key_${bearerToken}`);
+      if (userId) {
+        const userAccount = await getUserAccount(userId, env);
+        if (userAccount) {
+          currentUser = {
+            id: parseInt(userId),
+            login: userAccount.username,
+            avatar_url: userAccount.profile_picture,
+          };
+          sessionScopes = userAccount.private_granted ? "repo" : "read";
+          // Update last_used timestamp for the API key
+          const apiKeys =
+            ((await env.KV.get(`user_api_keys_${userId}`, "json")) as any[]) ||
+            [];
+          const keyIndex = apiKeys.findIndex((k: any) => k.key === bearerToken);
+          if (keyIndex !== -1) {
+            apiKeys[keyIndex].last_used = Date.now();
+            await env.KV.put(
+              `user_api_keys_${userId}`,
+              JSON.stringify(apiKeys),
+            );
+          }
+        }
+      }
+    } else {
+      // OAuth access token
+      const tokenData = await getAccessTokenData(bearerToken, env);
+      if (tokenData && Date.now() < tokenData.expires_at) {
+        githubAccessToken = tokenData.github_access_token;
+        const userResponse = await fetch("https://api.github.com/user", {
+          headers: {
+            Authorization: `Bearer ${githubAccessToken}`,
+            Accept: "application/vnd.github.v3+json",
+            "User-Agent": "uithub",
+          },
+        });
+        if (userResponse.ok) {
+          currentUser = await userResponse.json();
+          sessionScopes = tokenData.scopes;
+        }
       }
     }
   } else if (session.accessToken) {
