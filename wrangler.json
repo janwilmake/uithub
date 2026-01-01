@@ -3,7 +3,7 @@
   "name": "uithub-simple",
   "account_id": "080fd9e0587416d2fa30ed1f527e2323",
   "compatibility_date": "2025-11-30",
-  "main": "worker.ts",
+  "main": "src/index.ts",
   "assets": { "directory": "./" },
   "kv_namespaces": [
     { "binding": "KV", "id": "698c335bd4e343089a51846f803c75e0" }
