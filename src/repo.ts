@@ -746,25 +746,7 @@ function generateViewHTML(context: {
       color: #22c55e;
       font-weight: 500;
      }
-    .logout-btn {
-      background: rgba(239, 68, 68, 0.1);
-      border: 1px solid rgba(239, 68, 68, 0.3);
-      color: #ef4444;
-      padding: 6px 12px;
-      border-radius: 8px;
-      font-size: 12px;
-      font-weight: 500;
-      cursor: pointer;
-      transition: all 0.2s;
-      text-decoration: none;
-      display: flex;
-      align-items: center;
-      gap: 4px;
-    }
-    .logout-btn:hover {
-      background: rgba(239, 68, 68, 0.2);
-      border-color: rgba(239, 68, 68, 0.5);
-    }
+    
     .login-btn {
       background: linear-gradient(135deg, #8b5cf6 0%, #ec4899 100%);
       border: none;
@@ -816,9 +798,7 @@ function generateViewHTML(context: {
           <img src="${modalContext.profilePicture}" alt="${
               modalContext.username
             }" class="user-avatar">
-          <a href="${
-            modalContext.paymentLink || "#"
-          }" target="_blank" style="text-decoration:none;">
+          <a href="/dashboard" target="_blank" style="text-decoration:none;">
           <div class="user-info">
             <span class="user-name">@${modalContext.username}</span>
             ${
@@ -830,14 +810,7 @@ function generateViewHTML(context: {
             }
           </div>
           </a>
-          <a href="${logoutUrl}" class="logout-btn">
-            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-              <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"></path>
-              <polyline points="16 17 21 12 16 7"></polyline>
-              <line x1="21" y1="12" x2="9" y2="12"></line>
-            </svg>
-            Logout
-          </a>
+          
         </div>
       `
           : `

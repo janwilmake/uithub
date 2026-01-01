@@ -2,6 +2,9 @@ import { handleOwnerEndpoint } from "./owner";
 import { handleRepoEndpoint } from "./repo";
 import { type Env, authMiddleware } from "./auth";
 import { handleStripeWebhook } from "./stripe";
+import { handleDashboard } from "./dashboard";
+import { handleThreads } from "./threads";
+import { handleThread } from "./thread";
 
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
@@ -16,7 +19,13 @@ export default {
       return handleStripeWebhook(request, env);
     }
 
-    const [_, owner, repo] = url.pathname.split("/");
+    // Handle dashboard
+    if (url.pathname.startsWith("/dashboard")) {
+      return handleDashboard(request, env);
+    }
+
+    const [_, owner, repo, page, branch, ...pathParts] =
+      url.pathname.split("/");
 
     // Root
     if (!owner) {
@@ -31,6 +40,20 @@ export default {
     // User profile page
     if (!repo) {
       return handleOwnerEndpoint(request, env);
+    }
+
+    // Threads list (issues, pulls, discussions)
+    if (["issues", "pulls", "discussions"].includes(page) && !branch) {
+      return handleThreads(request, env);
+    }
+
+    // Single thread (issue or discussion)
+    if (
+      ["issues", "discussions"].includes(page) &&
+      branch &&
+      !pathParts.length
+    ) {
+      return handleThread(request, env);
     }
 
     // Repository content
