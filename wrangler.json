@@ -8,6 +8,10 @@
   "kv_namespaces": [
     { "binding": "KV", "id": "698c335bd4e343089a51846f803c75e0" }
   ],
+  "durable_objects": {
+    "bindings": [{ "name": "ANALYTICS_DO", "class_name": "AnalyticsDO" }]
+  },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["AnalyticsDO"] }],
   "env": {
     "prod": {
       "routes": [
@@ -16,7 +20,11 @@
       ],
       "kv_namespaces": [
         { "binding": "KV", "id": "698c335bd4e343089a51846f803c75e0" }
-      ]
+      ],
+      "durable_objects": {
+        "bindings": [{ "name": "ANALYTICS_DO", "class_name": "AnalyticsDO" }]
+      },
+      "migrations": [{ "tag": "v1", "new_sqlite_classes": ["AnalyticsDO"] }]
     }
   }
 }

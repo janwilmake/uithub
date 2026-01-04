@@ -5,9 +5,12 @@ import { handleStripeWebhook } from "./stripe";
 import { handleDashboard } from "./dashboard";
 import { handleThreads } from "./threads";
 import { handleThread } from "./thread";
+import { handleAnalytics, logAnalytics, AnalyticsDO } from "./analytics";
+
+export { AnalyticsDO };
 
 export default {
-  async fetch(request: Request, env: Env): Promise<Response> {
+  async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
     const url = new URL(request.url);
 
     // Handle auth middleware first
@@ -24,8 +27,14 @@ export default {
       return handleDashboard(request, env);
     }
 
+    // Handle analytics
+    if (url.pathname === "/analytics" && request.method === "GET") {
+      return handleAnalytics(request, env);
+    }
+
     const [_, owner, repo, page, branch, ...pathParts] =
       url.pathname.split("/");
+    const path = pathParts.join("/");
 
     // Root
     if (!owner) {
@@ -36,6 +45,16 @@ export default {
         },
       );
     }
+
+    // Log analytics for all content requests (background)
+    ctx.waitUntil(
+      logAnalytics(request, env, {
+        owner,
+        repo: repo || "",
+        page: page || "profile",
+        path,
+      })
+    );
 
     // User profile page
     if (!repo) {

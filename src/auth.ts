@@ -110,6 +110,7 @@ export interface Env {
   STRIPE_PAYMENT_LINK_ID: string;
   STRIPE_WEBHOOK_SIGNING_SECRET: string;
   KV: KVNamespace;
+  ANALYTICS_DO: DurableObjectNamespace<import("./analytics").AnalyticsDO>;
 }
 
 export interface UserAccount {
