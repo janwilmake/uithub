@@ -913,7 +913,8 @@ export const getUser = async (request: Request, env: Env) => {
   const session = getSessionFromCookie(request);
 
   let githubAccessToken: string | null = null;
-  let currentUser: any = null;
+  let currentUser: { id: number; login: string; avatar_url: string } | null =
+    null;
   let sessionScopes: string = "";
 
   if (bearerToken) {

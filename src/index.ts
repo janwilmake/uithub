@@ -1,6 +1,6 @@
 import { handleOwnerEndpoint } from "./owner";
 import { handleRepoEndpoint } from "./repo";
-import { type Env, authMiddleware } from "./auth";
+import { type Env, authMiddleware, getUser } from "./auth";
 import { handleStripeWebhook } from "./stripe";
 import { handleDashboard } from "./dashboard";
 import { handleThreads } from "./threads";
@@ -33,7 +33,13 @@ export default {
 
     // Handle analytics
     if (url.pathname === "/analytics" && request.method === "GET") {
-      return handleAnalytics(request, env);
+      const user = await getUser(request, env);
+      if (user.currentUser?.login === "janwilmake") {
+        return handleAnalytics(request, env);
+      }
+      return new Response("Unauthorized, only janwilmake has access", {
+        status: 401,
+      });
     }
 
     const [_, owner, repo, page, branch, ...pathParts] =
