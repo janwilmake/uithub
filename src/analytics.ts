@@ -1,5 +1,5 @@
 import { DurableObject } from "cloudflare:workers";
-import { type Env, getUser } from "./auth";
+import { type Env, getUser, getUserAccount } from "./auth";
 
 // ==================== TYPES ====================
 
@@ -15,6 +15,8 @@ interface AnalyticsDatapoint {
   user_agent: string;
   accept: string;
   is_api: boolean;
+  user_private_granted: boolean;
+  user_premium: boolean;
 }
 
 interface AnalyticsStats {
@@ -23,9 +25,21 @@ interface AnalyticsStats {
   api_requests: number;
   browser_requests: number;
   top_repos: { repo: string; count: number }[];
-  top_users: { username: string; profile_picture: string | null; count: number }[];
+  top_users: {
+    username: string;
+    profile_picture: string | null;
+    count: number;
+    user_private_granted: boolean;
+    user_premium: boolean;
+  }[];
   requests_by_hour: { hour: string; count: number }[];
   requests_by_day: { day: string; count: number }[];
+  unique_users_by_day: { day: string; count: number }[];
+  requests_by_page: { page: string; count: number }[];
+}
+
+interface UserRepos {
+  repos: { repo: string; count: number }[];
 }
 
 // ==================== DURABLE OBJECT ====================
@@ -61,12 +75,28 @@ export class AnalyticsDO extends DurableObject<Env> {
     this.sql.exec(`
       CREATE INDEX IF NOT EXISTS idx_owner_repo ON analytics(owner, repo)
     `);
+
+    // Migration: add user_private_granted and user_premium columns
+    try {
+      this.sql.exec(
+        `ALTER TABLE analytics ADD COLUMN user_private_granted INTEGER NOT NULL DEFAULT 0`,
+      );
+    } catch {
+      // Column already exists
+    }
+    try {
+      this.sql.exec(
+        `ALTER TABLE analytics ADD COLUMN user_premium INTEGER NOT NULL DEFAULT 0`,
+      );
+    } catch {
+      // Column already exists
+    }
   }
 
   async log(data: Omit<AnalyticsDatapoint, "id" | "timestamp">) {
     this.sql.exec(
-      `INSERT INTO analytics (timestamp, username, profile_picture, owner, repo, page, path, user_agent, accept, is_api)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      `INSERT INTO analytics (timestamp, username, profile_picture, owner, repo, page, path, user_agent, accept, is_api, user_private_granted, user_premium)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       Date.now(),
       data.username,
       data.profile_picture,
@@ -76,46 +106,71 @@ export class AnalyticsDO extends DurableObject<Env> {
       data.path,
       data.user_agent,
       data.accept,
-      data.is_api ? 1 : 0
+      data.is_api ? 1 : 0,
+      data.user_private_granted ? 1 : 0,
+      data.user_premium ? 1 : 0,
     );
   }
 
-  async getStats(days: number = 7): Promise<AnalyticsStats> {
+  async getStats(days: number = 30): Promise<AnalyticsStats> {
     const since = Date.now() - days * 24 * 60 * 60 * 1000;
 
-    const totalRequests = this.sql
-      .exec(`SELECT COUNT(*) as count FROM analytics WHERE timestamp > ?`, since)
-      .toArray()[0]?.count as number || 0;
+    const totalRequests =
+      (this.sql
+        .exec(
+          `SELECT COUNT(*) as count FROM analytics WHERE timestamp > ?`,
+          since,
+        )
+        .toArray()[0]?.count as number) || 0;
 
-    const uniqueUsers = this.sql
-      .exec(`SELECT COUNT(DISTINCT username) as count FROM analytics WHERE timestamp > ? AND username IS NOT NULL`, since)
-      .toArray()[0]?.count as number || 0;
+    const uniqueUsers =
+      (this.sql
+        .exec(
+          `SELECT COUNT(DISTINCT username) as count FROM analytics WHERE timestamp > ? AND username IS NOT NULL`,
+          since,
+        )
+        .toArray()[0]?.count as number) || 0;
 
-    const apiRequests = this.sql
-      .exec(`SELECT COUNT(*) as count FROM analytics WHERE timestamp > ? AND is_api = 1`, since)
-      .toArray()[0]?.count as number || 0;
+    const apiRequests =
+      (this.sql
+        .exec(
+          `SELECT COUNT(*) as count FROM analytics WHERE timestamp > ? AND is_api = 1`,
+          since,
+        )
+        .toArray()[0]?.count as number) || 0;
 
-    const browserRequests = this.sql
-      .exec(`SELECT COUNT(*) as count FROM analytics WHERE timestamp > ? AND is_api = 0`, since)
-      .toArray()[0]?.count as number || 0;
+    const browserRequests =
+      (this.sql
+        .exec(
+          `SELECT COUNT(*) as count FROM analytics WHERE timestamp > ? AND is_api = 0`,
+          since,
+        )
+        .toArray()[0]?.count as number) || 0;
 
     const topRepos = this.sql
       .exec(
         `SELECT owner || '/' || repo as repo, COUNT(*) as count
          FROM analytics WHERE timestamp > ?
          GROUP BY owner, repo ORDER BY count DESC LIMIT 10`,
-        since
+        since,
       )
       .toArray() as { repo: string; count: number }[];
 
     const topUsers = this.sql
       .exec(
-        `SELECT username, profile_picture, COUNT(*) as count
+        `SELECT username, profile_picture, COUNT(*) as count, MAX(user_private_granted) as user_private_granted, MAX(user_premium) as user_premium
          FROM analytics WHERE timestamp > ? AND username IS NOT NULL
          GROUP BY username ORDER BY count DESC LIMIT 10`,
-        since
+        since,
       )
-      .toArray() as { username: string; profile_picture: string | null; count: number }[];
+      .toArray()
+      .map((row: any) => ({
+        username: row.username as string,
+        profile_picture: row.profile_picture as string | null,
+        count: row.count as number,
+        user_private_granted: Boolean(row.user_private_granted),
+        user_premium: Boolean(row.user_premium),
+      }));
 
     // Requests by hour (last 24 hours)
     const last24h = Date.now() - 24 * 60 * 60 * 1000;
@@ -124,7 +179,7 @@ export class AnalyticsDO extends DurableObject<Env> {
         `SELECT strftime('%H', timestamp/1000, 'unixepoch') as hour, COUNT(*) as count
          FROM analytics WHERE timestamp > ?
          GROUP BY hour ORDER BY hour`,
-        last24h
+        last24h,
       )
       .toArray() as { hour: string; count: number }[];
 
@@ -134,9 +189,29 @@ export class AnalyticsDO extends DurableObject<Env> {
         `SELECT strftime('%Y-%m-%d', timestamp/1000, 'unixepoch') as day, COUNT(*) as count
          FROM analytics WHERE timestamp > ?
          GROUP BY day ORDER BY day`,
-        since
+        since,
       )
       .toArray() as { day: string; count: number }[];
+
+    // Unique users by day (last N days)
+    const uniqueUsersByDay = this.sql
+      .exec(
+        `SELECT strftime('%Y-%m-%d', timestamp/1000, 'unixepoch') as day, COUNT(DISTINCT username) as count
+         FROM analytics WHERE timestamp > ? AND username IS NOT NULL
+         GROUP BY day ORDER BY day`,
+        since,
+      )
+      .toArray() as { day: string; count: number }[];
+
+    // Requests by page type
+    const requestsByPage = this.sql
+      .exec(
+        `SELECT page, COUNT(*) as count
+         FROM analytics WHERE timestamp > ?
+         GROUP BY page ORDER BY count DESC`,
+        since,
+      )
+      .toArray() as { page: string; count: number }[];
 
     return {
       total_requests: totalRequests,
@@ -147,17 +222,39 @@ export class AnalyticsDO extends DurableObject<Env> {
       top_users: topUsers,
       requests_by_hour: requestsByHour,
       requests_by_day: requestsByDay,
+      unique_users_by_day: uniqueUsersByDay,
+      requests_by_page: requestsByPage,
     };
   }
 
   async getRecentRequests(limit: number = 100): Promise<AnalyticsDatapoint[]> {
     return this.sql
       .exec(
-        `SELECT id, timestamp, username, profile_picture, owner, repo, page, path, user_agent, accept, is_api
+        `SELECT id, timestamp, username, profile_picture, owner, repo, page, path, user_agent, accept, is_api, user_private_granted, user_premium
          FROM analytics ORDER BY timestamp DESC LIMIT ?`,
-        limit
+        limit,
       )
-      .toArray() as AnalyticsDatapoint[];
+      .toArray()
+      .map((row: any) => ({
+        ...row,
+        is_api: Boolean(row.is_api),
+        user_private_granted: Boolean(row.user_private_granted),
+        user_premium: Boolean(row.user_premium),
+      })) as AnalyticsDatapoint[];
+  }
+
+  async getReposForUser(username: string, days: number = 30): Promise<UserRepos> {
+    const since = Date.now() - days * 24 * 60 * 60 * 1000;
+    const repos = this.sql
+      .exec(
+        `SELECT owner || '/' || repo as repo, COUNT(*) as count
+         FROM analytics WHERE timestamp > ? AND username = ?
+         GROUP BY owner, repo ORDER BY count DESC`,
+        since,
+        username,
+      )
+      .toArray() as { repo: string; count: number }[];
+    return { repos };
   }
 }
 
@@ -171,7 +268,7 @@ export async function logAnalytics(
     repo: string;
     page: string;
     path: string;
-  }
+  },
 ) {
   const { currentUser } = await getUser(request, env);
 
@@ -182,9 +279,15 @@ export async function logAnalytics(
 
   const accept = request.headers.get("Accept") || "";
   const userAgent = request.headers.get("User-Agent") || "";
-  const isApi = !accept.includes("text/html") || userAgent.includes("curl") || userAgent.includes("httpie");
+  const isApi =
+    !accept.includes("text/html") ||
+    userAgent.includes("curl") ||
+    userAgent.includes("httpie");
 
-  const id = env.ANALYTICS_DO.idFromName("global");
+  // Get user account for premium/private flags
+  const userAccount = await getUserAccount(String(currentUser.id), env);
+
+  const id = env.ANALYTICS_DO.idFromName("global2");
   const stub = env.ANALYTICS_DO.get(id);
 
   await stub.log({
@@ -197,6 +300,8 @@ export async function logAnalytics(
     user_agent: userAgent,
     accept,
     is_api: isApi,
+    user_private_granted: userAccount?.private_granted || false,
+    user_premium: userAccount?.premium || false,
   });
 }
 
@@ -321,10 +426,140 @@ function generateAnalyticsHTML(stats: AnalyticsStats): string {
       font-weight: 700;
       color: #8b5cf6;
     }
+    .user-badge {
+      display: inline-block;
+      padding: 2px 6px;
+      border-radius: 4px;
+      font-size: 10px;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+      margin-left: 8px;
+    }
+    .badge-premium {
+      background: linear-gradient(135deg, #f59e0b 0%, #d97706 100%);
+      color: #fff;
+    }
+    .badge-private {
+      background: linear-gradient(135deg, #10b981 0%, #059669 100%);
+      color: #fff;
+    }
     .empty-state {
       text-align: center;
       padding: 40px;
       opacity: 0.5;
+    }
+    .list-item-name.clickable {
+      cursor: pointer;
+      transition: color 0.2s;
+    }
+    .list-item-name.clickable:hover {
+      color: #8b5cf6;
+    }
+    .repo-actions {
+      display: flex;
+      gap: 8px;
+      margin-left: 12px;
+    }
+    .repo-btn {
+      padding: 4px 8px;
+      border-radius: 4px;
+      font-size: 12px;
+      text-decoration: none;
+      transition: opacity 0.2s;
+    }
+    .repo-btn:hover {
+      opacity: 0.8;
+    }
+    .repo-btn-github {
+      background: #333;
+      color: #fff;
+    }
+    .repo-btn-uithub {
+      background: linear-gradient(135deg, #8b5cf6 0%, #ec4899 100%);
+      color: #fff;
+    }
+    /* Modal styles */
+    .modal-overlay {
+      display: none;
+      position: fixed;
+      top: 0;
+      left: 0;
+      right: 0;
+      bottom: 0;
+      background: rgba(0, 0, 0, 0.8);
+      z-index: 1000;
+      align-items: center;
+      justify-content: center;
+    }
+    .modal-overlay.active {
+      display: flex;
+    }
+    .modal {
+      background: #2a2a2a;
+      border-radius: 12px;
+      padding: 24px;
+      max-width: 600px;
+      width: 90%;
+      max-height: 80vh;
+      overflow-y: auto;
+    }
+    .modal-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-bottom: 20px;
+    }
+    .modal-header h3 {
+      margin: 0;
+      color: #8b5cf6;
+      display: flex;
+      align-items: center;
+      gap: 12px;
+    }
+    .modal-close {
+      background: none;
+      border: none;
+      color: #888;
+      font-size: 24px;
+      cursor: pointer;
+    }
+    .modal-close:hover {
+      color: #fff;
+    }
+    .modal-user-link {
+      color: #ec4899;
+      text-decoration: none;
+      font-size: 14px;
+    }
+    .modal-user-link:hover {
+      text-decoration: underline;
+    }
+    .modal-repo-item {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 12px;
+      background: #1a1a1a;
+      border-radius: 8px;
+      margin-bottom: 8px;
+    }
+    .modal-repo-left {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+    }
+    .modal-repo-name {
+      font-weight: 500;
+    }
+    .modal-repo-count {
+      color: #8b5cf6;
+      font-weight: 700;
+    }
+    .modal-loading {
+      text-align: center;
+      padding: 40px;
+      color: #888;
     }
     @media (max-width: 600px) {
       .charts-grid, .lists-grid {
@@ -366,9 +601,15 @@ function generateAnalyticsHTML(stats: AnalyticsStats): string {
         </div>
       </div>
       <div class="chart-card">
-        <h3>Requests by Day (Last 7 Days)</h3>
+        <h3>Requests by Day (Last 30 Days)</h3>
         <div class="chart-container">
           <canvas id="dailyChart"></canvas>
+        </div>
+      </div>
+      <div class="chart-card">
+        <h3>Unique Users by Day (Last 30 Days)</h3>
+        <div class="chart-container">
+          <canvas id="uniqueUsersChart"></canvas>
         </div>
       </div>
       <div class="chart-card">
@@ -377,40 +618,82 @@ function generateAnalyticsHTML(stats: AnalyticsStats): string {
           <canvas id="typeChart"></canvas>
         </div>
       </div>
+      <div class="chart-card">
+        <h3>Page Types</h3>
+        <div class="chart-container">
+          <canvas id="pageChart"></canvas>
+        </div>
+      </div>
     </div>
 
     <div class="lists-grid">
       <div class="list-card">
         <h3>Top Repositories</h3>
-        ${stats.top_repos.length === 0
-          ? '<div class="empty-state">No data yet</div>'
-          : stats.top_repos.map(repo => `
+        ${
+          stats.top_repos.length === 0
+            ? '<div class="empty-state">No data yet</div>'
+            : stats.top_repos
+                .map(
+                  (repo) => `
             <div class="list-item">
               <div class="list-item-left">
                 <span class="list-item-name">${repo.repo}</span>
+                <div class="repo-actions">
+                  <a href="https://github.com/${repo.repo}" target="_blank" class="repo-btn repo-btn-github">GitHub</a>
+                  <a href="https://uithub.com/${repo.repo}" target="_blank" class="repo-btn repo-btn-uithub">UIThub</a>
+                </div>
               </div>
               <span class="list-item-count">${repo.count.toLocaleString()}</span>
             </div>
-          `).join('')
+          `,
+                )
+                .join("")
         }
       </div>
       <div class="list-card">
         <h3>Top Users</h3>
-        ${stats.top_users.length === 0
-          ? '<div class="empty-state">No data yet</div>'
-          : stats.top_users.map(user => `
+        ${
+          stats.top_users.length === 0
+            ? '<div class="empty-state">No data yet</div>'
+            : stats.top_users
+                .map(
+                  (user) => `
             <div class="list-item">
               <div class="list-item-left">
-                ${user.profile_picture
-                  ? `<img src="${user.profile_picture}" alt="${user.username}" class="user-avatar">`
-                  : ''
+                ${
+                  user.profile_picture
+                    ? `<img src="${user.profile_picture}" alt="${user.username}" class="user-avatar">`
+                    : ""
                 }
-                <span class="list-item-name">${user.username}</span>
+                <span class="list-item-name clickable" onclick="showUserRepos('${user.username}', '${user.profile_picture || ""}')">${user.username}</span>
+                ${user.user_premium ? '<span class="user-badge badge-premium">Premium</span>' : ""}
+                ${user.user_private_granted ? '<span class="user-badge badge-private">Private Granted</span>' : ""}
               </div>
               <span class="list-item-count">${user.count.toLocaleString()}</span>
             </div>
-          `).join('')
+          `,
+                )
+                .join("")
         }
+      </div>
+    </div>
+  </div>
+
+  <!-- User Repos Modal -->
+  <div id="userModal" class="modal-overlay" onclick="if(event.target === this) closeModal()">
+    <div class="modal">
+      <div class="modal-header">
+        <h3>
+          <img id="modalUserAvatar" src="" alt="" class="user-avatar" style="display:none;">
+          <span id="modalUserName"></span>
+        </h3>
+        <button class="modal-close" onclick="closeModal()">&times;</button>
+      </div>
+      <div style="margin-bottom: 16px;">
+        <a id="modalGithubLink" href="" target="_blank" class="modal-user-link">View on GitHub &rarr;</a>
+      </div>
+      <div id="modalContent">
+        <div class="modal-loading">Loading...</div>
       </div>
     </div>
   </div>
@@ -471,6 +754,24 @@ function generateAnalyticsHTML(stats: AnalyticsStats): string {
       options: chartOptions
     });
 
+    // Unique users by day chart
+    const uniqueUsersData = ${JSON.stringify(stats.unique_users_by_day)};
+    new Chart(document.getElementById('uniqueUsersChart'), {
+      type: 'line',
+      data: {
+        labels: uniqueUsersData.map(d => d.day),
+        datasets: [{
+          label: 'Unique Users',
+          data: uniqueUsersData.map(d => d.count),
+          borderColor: '#10b981',
+          backgroundColor: 'rgba(16, 185, 129, 0.1)',
+          fill: true,
+          tension: 0.3
+        }]
+      },
+      options: chartOptions
+    });
+
     // Type chart
     new Chart(document.getElementById('typeChart'), {
       type: 'doughnut',
@@ -491,6 +792,88 @@ function generateAnalyticsHTML(stats: AnalyticsStats): string {
         }
       }
     });
+
+    // Page types chart
+    const pageData = ${JSON.stringify(stats.requests_by_page)};
+    const pageColors = [
+      '#8b5cf6', '#ec4899', '#10b981', '#f59e0b', '#3b82f6',
+      '#ef4444', '#06b6d4', '#84cc16', '#f97316', '#a855f7'
+    ];
+    new Chart(document.getElementById('pageChart'), {
+      type: 'doughnut',
+      data: {
+        labels: pageData.map(d => d.page),
+        datasets: [{
+          data: pageData.map(d => d.count),
+          backgroundColor: pageData.map((_, i) => pageColors[i % pageColors.length])
+        }]
+      },
+      options: {
+        responsive: true,
+        maintainAspectRatio: false,
+        plugins: {
+          legend: {
+            labels: { color: '#f0f0f0' },
+            position: 'right'
+          }
+        }
+      }
+    });
+
+    // Modal functions
+    function showUserRepos(username, profilePicture) {
+      const modal = document.getElementById('userModal');
+      const modalUserName = document.getElementById('modalUserName');
+      const modalUserAvatar = document.getElementById('modalUserAvatar');
+      const modalGithubLink = document.getElementById('modalGithubLink');
+      const modalContent = document.getElementById('modalContent');
+
+      modalUserName.textContent = username;
+      modalGithubLink.href = 'https://github.com/' + username;
+
+      if (profilePicture) {
+        modalUserAvatar.src = profilePicture;
+        modalUserAvatar.style.display = 'block';
+      } else {
+        modalUserAvatar.style.display = 'none';
+      }
+
+      modalContent.innerHTML = '<div class="modal-loading">Loading...</div>';
+      modal.classList.add('active');
+
+      fetch('?user=' + encodeURIComponent(username))
+        .then(res => res.json())
+        .then(data => {
+          if (data.repos.length === 0) {
+            modalContent.innerHTML = '<div class="empty-state">No repositories found</div>';
+            return;
+          }
+          modalContent.innerHTML = data.repos.map(repo => \`
+            <div class="modal-repo-item">
+              <div class="modal-repo-left">
+                <span class="modal-repo-name">\${repo.repo}</span>
+                <div class="repo-actions">
+                  <a href="https://github.com/\${repo.repo}" target="_blank" class="repo-btn repo-btn-github">GitHub</a>
+                  <a href="https://uithub.com/\${repo.repo}" target="_blank" class="repo-btn repo-btn-uithub">UIThub</a>
+                </div>
+              </div>
+              <span class="modal-repo-count">\${repo.count.toLocaleString()}</span>
+            </div>
+          \`).join('');
+        })
+        .catch(err => {
+          modalContent.innerHTML = '<div class="empty-state">Failed to load repositories</div>';
+        });
+    }
+
+    function closeModal() {
+      document.getElementById('userModal').classList.remove('active');
+    }
+
+    // Close modal on escape key
+    document.addEventListener('keydown', function(e) {
+      if (e.key === 'Escape') closeModal();
+    });
   </script>
 </body>
 </html>`;
@@ -500,13 +883,21 @@ function generateAnalyticsHTML(stats: AnalyticsStats): string {
 
 export async function handleAnalytics(
   request: Request,
-  env: Env
+  env: Env,
 ): Promise<Response> {
   const url = new URL(request.url);
-  const days = parseInt(url.searchParams.get("days") || "7");
+  const days = parseInt(url.searchParams.get("days") || "30");
 
-  const id = env.ANALYTICS_DO.idFromName("global");
+  const id = env.ANALYTICS_DO.idFromName("global2");
   const stub = env.ANALYTICS_DO.get(id);
+
+  // Handle user repos endpoint
+  const userParam = url.searchParams.get("user");
+  if (userParam) {
+    const userRepos = await stub.getReposForUser(userParam, days);
+    return Response.json(userRepos);
+  }
+
   const stats = await stub.getStats(days);
 
   const accept = request.headers.get("Accept") || "";

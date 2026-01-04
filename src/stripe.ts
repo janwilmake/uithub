@@ -81,6 +81,7 @@ export async function handleStripeWebhook(
 
     if (account) {
       account.credit += amount_subtotal;
+      account.premium = true;
       await setUserAccount(userId, account, env);
     } else {
       const newAccount: UserAccount = {
@@ -88,7 +89,7 @@ export async function handleStripeWebhook(
         username: "",
         profile_picture: "",
         private_granted: false,
-        premium: false,
+        premium: true,
       };
       await setUserAccount(userId, newAccount, env);
     }

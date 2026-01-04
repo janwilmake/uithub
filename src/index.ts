@@ -10,7 +10,11 @@ import { handleAnalytics, logAnalytics, AnalyticsDO } from "./analytics";
 export { AnalyticsDO };
 
 export default {
-  async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
+  async fetch(
+    request: Request,
+    env: Env,
+    ctx: ExecutionContext,
+  ): Promise<Response> {
     const url = new URL(request.url);
 
     // Handle auth middleware first
@@ -51,9 +55,9 @@ export default {
       logAnalytics(request, env, {
         owner,
         repo: repo || "",
-        page: page || "profile",
+        page: page ? page : repo ? "tree" : "profile",
         path,
-      })
+      }),
     );
 
     // User profile page

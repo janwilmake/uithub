@@ -12,4 +12,4 @@ Requirements
 - ✅ Should have all features the old uithub had
 - ✅ Should be free and accessible but if no API key is provided, show an unclosable popup to sign w/ github first, without private repo access
 - ✅ Should stream zip contents to the result page but using Cloudflare
-- **(TODO)** Should follow MCP standard for oauth such that any client can get an API key that hides the original github key
+- ✅ Should follow MCP standard for oauth such that any client can get an API key that hides the original github key
