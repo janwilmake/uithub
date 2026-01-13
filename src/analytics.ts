@@ -19,11 +19,40 @@ interface AnalyticsDatapoint {
   user_premium: boolean;
 }
 
+interface RetentionCohort {
+  cohort_week: string; // e.g., "2024-W01"
+  cohort_size: number;
+  week_1_retained: number; // percentage
+  week_2_retained: number;
+  week_3_retained: number;
+  week_4_retained: number;
+}
+
+interface PremiumUser {
+  username: string;
+  profile_picture: string | null;
+  last_active_date: string;
+  request_count: number;
+}
+
 interface AnalyticsStats {
   total_requests: number;
   unique_users: number;
   api_requests: number;
   browser_requests: number;
+  // DAU/MAU metrics
+  dau: number;
+  wau: number;
+  mau: number;
+  dau_mau_ratio: number; // "stickiness" - healthy SaaS is 20-50%
+  dau_wau_ratio: number;
+  // User type metrics
+  unique_premium_users: number;
+  unique_private_users: number;
+  premium_to_private_ratio: number; // percentage of premium users compared to private users
+  premium_users_list: PremiumUser[];
+  // Retention cohorts
+  retention_cohorts: RetentionCohort[];
   top_repos: { repo: string; count: number }[];
   top_users: {
     username: string;
@@ -213,11 +242,97 @@ export class AnalyticsDO extends DurableObject<Env> {
       )
       .toArray() as { page: string; count: number }[];
 
+    // DAU/WAU/MAU calculations
+    const now = Date.now();
+    const oneDayAgo = now - 24 * 60 * 60 * 1000;
+    const oneWeekAgo = now - 7 * 24 * 60 * 60 * 1000;
+    const oneMonthAgo = now - 30 * 24 * 60 * 60 * 1000;
+
+    const dau =
+      (this.sql
+        .exec(
+          `SELECT COUNT(DISTINCT username) as count FROM analytics WHERE timestamp > ? AND username IS NOT NULL`,
+          oneDayAgo,
+        )
+        .toArray()[0]?.count as number) || 0;
+
+    const wau =
+      (this.sql
+        .exec(
+          `SELECT COUNT(DISTINCT username) as count FROM analytics WHERE timestamp > ? AND username IS NOT NULL`,
+          oneWeekAgo,
+        )
+        .toArray()[0]?.count as number) || 0;
+
+    const mau =
+      (this.sql
+        .exec(
+          `SELECT COUNT(DISTINCT username) as count FROM analytics WHERE timestamp > ? AND username IS NOT NULL`,
+          oneMonthAgo,
+        )
+        .toArray()[0]?.count as number) || 0;
+
+    const dauMauRatio = mau > 0 ? Math.round((dau / mau) * 100) : 0;
+    const dauWauRatio = wau > 0 ? Math.round((dau / wau) * 100) : 0;
+
+    // Premium and private user counts
+    const uniquePremiumUsers =
+      (this.sql
+        .exec(
+          `SELECT COUNT(DISTINCT username) as count FROM analytics WHERE timestamp > ? AND username IS NOT NULL AND user_premium = 1`,
+          since,
+        )
+        .toArray()[0]?.count as number) || 0;
+
+    const uniquePrivateUsers =
+      (this.sql
+        .exec(
+          `SELECT COUNT(DISTINCT username) as count FROM analytics WHERE timestamp > ? AND username IS NOT NULL AND user_private_granted = 1`,
+          since,
+        )
+        .toArray()[0]?.count as number) || 0;
+
+    const premiumToPrivateRatio =
+      uniquePrivateUsers > 0
+        ? Math.round((uniquePremiumUsers / uniquePrivateUsers) * 100)
+        : 0;
+
+    // List of premium users with last active date, sorted by recency
+    const premiumUsersList = this.sql
+      .exec(
+        `SELECT username, profile_picture, MAX(timestamp) as last_active, COUNT(*) as request_count
+         FROM analytics
+         WHERE username IS NOT NULL AND user_premium = 1
+         GROUP BY username
+         ORDER BY last_active DESC`,
+      )
+      .toArray()
+      .map((row: any) => ({
+        username: row.username as string,
+        profile_picture: row.profile_picture as string | null,
+        last_active_date: new Date(row.last_active as number).toISOString(),
+        request_count: row.request_count as number,
+      })) as PremiumUser[];
+
+    // Retention cohorts calculation
+    // Get users grouped by the week they were first seen
+    const retentionCohorts = this.calculateRetentionCohorts();
+
     return {
       total_requests: totalRequests,
       unique_users: uniqueUsers,
       api_requests: apiRequests,
       browser_requests: browserRequests,
+      dau,
+      wau,
+      mau,
+      dau_mau_ratio: dauMauRatio,
+      dau_wau_ratio: dauWauRatio,
+      unique_premium_users: uniquePremiumUsers,
+      unique_private_users: uniquePrivateUsers,
+      premium_to_private_ratio: premiumToPrivateRatio,
+      premium_users_list: premiumUsersList,
+      retention_cohorts: retentionCohorts,
       top_repos: topRepos,
       top_users: topUsers,
       requests_by_hour: requestsByHour,
@@ -225,6 +340,131 @@ export class AnalyticsDO extends DurableObject<Env> {
       unique_users_by_day: uniqueUsersByDay,
       requests_by_page: requestsByPage,
     };
+  }
+
+  async getAllUsers(): Promise<{ username: string; profile_picture: string | null }[]> {
+    const rows = this.sql
+      .exec(
+        `SELECT username, profile_picture, MAX(timestamp) as last_seen
+         FROM analytics
+         WHERE username IS NOT NULL
+         GROUP BY username
+         ORDER BY last_seen DESC`,
+      )
+      .toArray() as { username: string; profile_picture: string | null }[];
+
+    return rows.map((row) => ({
+      username: row.username,
+      profile_picture: row.profile_picture,
+    }));
+  }
+
+  private calculateRetentionCohorts(): RetentionCohort[] {
+    const now = Date.now();
+    const weekMs = 7 * 24 * 60 * 60 * 1000;
+
+    // Get first seen timestamp for each user
+    const userFirstSeen = this.sql
+      .exec(
+        `SELECT username, MIN(timestamp) as first_seen
+         FROM analytics
+         WHERE username IS NOT NULL
+         GROUP BY username`,
+      )
+      .toArray() as { username: string; first_seen: number }[];
+
+    // Group users into weekly cohorts (last 8 weeks, excluding current week)
+    const cohorts: Map<
+      string,
+      { users: Set<string>; firstSeenStart: number }
+    > = new Map();
+
+    for (const user of userFirstSeen) {
+      // Calculate which week this user was first seen
+      const weeksAgo = Math.floor((now - user.first_seen) / weekMs);
+      if (weeksAgo < 1 || weeksAgo > 8) continue; // Skip current week and anything older than 8 weeks
+
+      const cohortDate = new Date(user.first_seen);
+      const year = cohortDate.getUTCFullYear();
+      const weekNum = this.getISOWeek(cohortDate);
+      const cohortKey = `${year}-W${weekNum.toString().padStart(2, "0")}`;
+
+      if (!cohorts.has(cohortKey)) {
+        // Start of that week
+        const weekStart =
+          now - weeksAgo * weekMs - ((now - user.first_seen) % weekMs);
+        cohorts.set(cohortKey, { users: new Set(), firstSeenStart: weekStart });
+      }
+      cohorts.get(cohortKey)!.users.add(user.username);
+    }
+
+    // For each cohort, calculate retention for weeks 1-4
+    const results: RetentionCohort[] = [];
+
+    for (const [cohortKey, cohortData] of cohorts) {
+      const cohortUsers = Array.from(cohortData.users);
+      if (cohortUsers.length === 0) continue;
+
+      const retentionWeeks: number[] = [];
+
+      for (let week = 1; week <= 4; week++) {
+        // Check how many users from this cohort were active in week N after their first week
+        const weekStart = cohortData.firstSeenStart + week * weekMs;
+        const weekEnd = weekStart + weekMs;
+
+        // Skip future weeks
+        if (weekStart > now) {
+          retentionWeeks.push(-1); // -1 indicates N/A
+          continue;
+        }
+
+        // Batch users to avoid exceeding 100 parameter limit (97 users + 2 timestamp params)
+        const BATCH_SIZE = 97;
+        const activeUsers = new Set<string>();
+
+        for (let i = 0; i < cohortUsers.length; i += BATCH_SIZE) {
+          const batch = cohortUsers.slice(i, i + BATCH_SIZE);
+          const batchResults = this.sql
+            .exec(
+              `SELECT DISTINCT username
+               FROM analytics
+               WHERE username IN (${batch.map(() => "?").join(",")})
+                 AND timestamp >= ? AND timestamp < ?`,
+              ...batch,
+              weekStart,
+              weekEnd,
+            )
+            .toArray() as { username: string }[];
+
+          for (const row of batchResults) {
+            activeUsers.add(row.username);
+          }
+        }
+
+        const retentionPct = Math.round((activeUsers.size / cohortUsers.length) * 100);
+        retentionWeeks.push(retentionPct);
+      }
+
+      results.push({
+        cohort_week: cohortKey,
+        cohort_size: cohortUsers.length,
+        week_1_retained: retentionWeeks[0],
+        week_2_retained: retentionWeeks[1],
+        week_3_retained: retentionWeeks[2],
+        week_4_retained: retentionWeeks[3],
+      });
+    }
+
+    // Sort by cohort week descending (most recent first)
+    return results.sort((a, b) => b.cohort_week.localeCompare(a.cohort_week));
+  }
+
+  private getISOWeek(date: Date): number {
+    const d = new Date(Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), date.getUTCDate()));
+    const dayNum = d.getUTCDay() || 7;
+    d.setUTCDate(d.getUTCDate() + 4 - dayNum);
+    const yearStart = new Date(Date.UTC(d.getUTCFullYear(), 0, 1));
+    return Math.ceil(((d.getTime() - yearStart.getTime()) / 86400000 + 1) / 7);
   }
 
   async getRecentRequests(limit: number = 100): Promise<AnalyticsDatapoint[]> {
@@ -363,6 +603,17 @@ function generateAnalyticsHTML(stats: AnalyticsStats): string {
       opacity: 0.7;
       text-transform: uppercase;
       letter-spacing: 1px;
+    }
+    .stat-hint {
+      font-size: 11px;
+      opacity: 0.5;
+      margin-top: 4px;
+    }
+    .stat-value.healthy {
+      color: #10b981;
+    }
+    .stat-value.warning {
+      color: #f59e0b;
     }
     .charts-grid {
       display: grid;
@@ -561,9 +812,61 @@ function generateAnalyticsHTML(stats: AnalyticsStats): string {
       padding: 40px;
       color: #888;
     }
+    .cohort-section {
+      margin-bottom: 40px;
+    }
+    .cohort-card {
+      background: #2a2a2a;
+      border-radius: 12px;
+      padding: 24px;
+    }
+    .cohort-card h3 {
+      margin: 0 0 20px;
+      color: #8b5cf6;
+    }
+    .cohort-table {
+      width: 100%;
+      border-collapse: collapse;
+    }
+    .cohort-table th,
+    .cohort-table td {
+      padding: 12px;
+      text-align: center;
+      border-bottom: 1px solid #333;
+    }
+    .cohort-table th {
+      font-size: 12px;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+      opacity: 0.7;
+    }
+    .cohort-table td:first-child {
+      text-align: left;
+      font-weight: 500;
+    }
+    .cohort-table .cohort-size {
+      color: #888;
+      font-size: 12px;
+    }
+    .retention-cell {
+      border-radius: 6px;
+      padding: 8px 12px;
+      font-weight: 600;
+    }
+    .retention-high { background: rgba(16, 185, 129, 0.3); color: #10b981; }
+    .retention-medium { background: rgba(245, 158, 11, 0.3); color: #f59e0b; }
+    .retention-low { background: rgba(239, 68, 68, 0.3); color: #ef4444; }
+    .retention-na { color: #555; }
     @media (max-width: 600px) {
       .charts-grid, .lists-grid {
         grid-template-columns: 1fr;
+      }
+      .cohort-table {
+        font-size: 12px;
+      }
+      .cohort-table th,
+      .cohort-table td {
+        padding: 8px 4px;
       }
     }
   </style>
@@ -572,6 +875,7 @@ function generateAnalyticsHTML(stats: AnalyticsStats): string {
   <div class="container">
     <div class="header">
       <h1>Analytics Dashboard</h1>
+      <a href="https://dash.cloudflare.com/080fd9e0587416d2fa30ed1f527e2323/workers/durable-objects/view/5ec4281783cd47af832ee5b50273562d/studio?jurisdiction=none&name=global2" target="_blank" style="color: #8b5cf6; text-decoration: none; font-size: 14px; margin-top: 8px; display: inline-block;">Open DB in Cloudflare Dashboard &rarr;</a>
     </div>
 
     <div class="stats-grid">
@@ -590,6 +894,42 @@ function generateAnalyticsHTML(stats: AnalyticsStats): string {
       <div class="stat-card">
         <div class="stat-value">${stats.browser_requests.toLocaleString()}</div>
         <div class="stat-label">Browser Requests</div>
+      </div>
+    </div>
+
+    <div class="stats-grid" style="margin-bottom: 40px;">
+      <div class="stat-card">
+        <div class="stat-value">${stats.dau.toLocaleString()}</div>
+        <div class="stat-label">DAU (24h)</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-value">${stats.wau.toLocaleString()}</div>
+        <div class="stat-label">WAU (7d)</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-value">${stats.mau.toLocaleString()}</div>
+        <div class="stat-label">MAU (30d)</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-value ${stats.dau_mau_ratio >= 20 ? "healthy" : "warning"}">${stats.dau_mau_ratio}%</div>
+        <div class="stat-label">DAU/MAU Ratio</div>
+        <div class="stat-hint">${stats.dau_mau_ratio >= 20 ? "Healthy (20%+)" : "Below target"}</div>
+      </div>
+    </div>
+
+    <div class="stats-grid" style="margin-bottom: 40px;">
+      <div class="stat-card">
+        <div class="stat-value">${stats.unique_premium_users.toLocaleString()}</div>
+        <div class="stat-label">Premium Users</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-value">${stats.unique_private_users.toLocaleString()}</div>
+        <div class="stat-label">Private Users</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-value ${stats.premium_to_private_ratio > 0 ? "healthy" : ""}">${stats.premium_to_private_ratio}%</div>
+        <div class="stat-label">Premium / Private</div>
+        <div class="stat-hint">Premium users as % of private users</div>
       </div>
     </div>
 
@@ -626,7 +966,76 @@ function generateAnalyticsHTML(stats: AnalyticsStats): string {
       </div>
     </div>
 
+    <div class="cohort-section">
+      <div class="cohort-card">
+        <h3>Retention Cohorts (Weekly)</h3>
+        ${
+          stats.retention_cohorts.length === 0
+            ? '<div class="empty-state">Not enough data for cohort analysis yet</div>'
+            : `
+        <table class="cohort-table">
+          <thead>
+            <tr>
+              <th>Cohort</th>
+              <th>Users</th>
+              <th>Week 1</th>
+              <th>Week 2</th>
+              <th>Week 3</th>
+              <th>Week 4</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${stats.retention_cohorts
+              .map(
+                (cohort) => `
+              <tr>
+                <td>${cohort.cohort_week}</td>
+                <td class="cohort-size">${cohort.cohort_size}</td>
+                <td><span class="retention-cell ${cohort.week_1_retained < 0 ? "retention-na" : cohort.week_1_retained >= 40 ? "retention-high" : cohort.week_1_retained >= 20 ? "retention-medium" : "retention-low"}">${cohort.week_1_retained < 0 ? "—" : cohort.week_1_retained + "%"}</span></td>
+                <td><span class="retention-cell ${cohort.week_2_retained < 0 ? "retention-na" : cohort.week_2_retained >= 30 ? "retention-high" : cohort.week_2_retained >= 15 ? "retention-medium" : "retention-low"}">${cohort.week_2_retained < 0 ? "—" : cohort.week_2_retained + "%"}</span></td>
+                <td><span class="retention-cell ${cohort.week_3_retained < 0 ? "retention-na" : cohort.week_3_retained >= 25 ? "retention-high" : cohort.week_3_retained >= 10 ? "retention-medium" : "retention-low"}">${cohort.week_3_retained < 0 ? "—" : cohort.week_3_retained + "%"}</span></td>
+                <td><span class="retention-cell ${cohort.week_4_retained < 0 ? "retention-na" : cohort.week_4_retained >= 20 ? "retention-high" : cohort.week_4_retained >= 10 ? "retention-medium" : "retention-low"}">${cohort.week_4_retained < 0 ? "—" : cohort.week_4_retained + "%"}</span></td>
+              </tr>
+            `,
+              )
+              .join("")}
+          </tbody>
+        </table>
+        `
+        }
+      </div>
+    </div>
+
     <div class="lists-grid">
+      <div class="list-card">
+        <h3>Premium Users (by Last Active)</h3>
+        ${
+          stats.premium_users_list.length === 0
+            ? '<div class="empty-state">No premium users yet</div>'
+            : stats.premium_users_list
+                .map(
+                  (user) => `
+            <div class="list-item">
+              <div class="list-item-left">
+                ${
+                  user.profile_picture
+                    ? `<img src="${user.profile_picture}" alt="${user.username}" class="user-avatar">`
+                    : ""
+                }
+                <div>
+                  <span class="list-item-name clickable" onclick="showUserRepos('${user.username}', '${user.profile_picture || ""}')">${user.username}</span>
+                  <div style="font-size: 12px; color: #888; margin-top: 2px;">
+                    Last active: ${new Date(user.last_active_date).toLocaleDateString()} ${new Date(user.last_active_date).toLocaleTimeString()}
+                  </div>
+                </div>
+              </div>
+              <span class="list-item-count">${user.request_count.toLocaleString()} reqs</span>
+            </div>
+          `,
+                )
+                .join("")
+        }
+      </div>
       <div class="list-card">
         <h3>Top Repositories</h3>
         ${

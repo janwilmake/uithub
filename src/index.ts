@@ -6,8 +6,9 @@ import { handleDashboard } from "./dashboard";
 import { handleThreads } from "./threads";
 import { handleThread } from "./thread";
 import { handleAnalytics, logAnalytics, AnalyticsDO } from "./analytics";
+import { handleSocials, SocialsDO } from "./socials";
 
-export { AnalyticsDO };
+export { AnalyticsDO, SocialsDO };
 
 export default {
   async fetch(
@@ -42,6 +43,17 @@ export default {
       });
     }
 
+    // Handle socials
+    if (url.pathname === "/socials") {
+      const user = await getUser(request, env);
+      if (user.currentUser?.login === "janwilmake") {
+        return handleSocials(request, env);
+      }
+      return new Response("Unauthorized, only janwilmake has access", {
+        status: 401,
+      });
+    }
+
     const [_, owner, repo, page, branch, ...pathParts] =
       url.pathname.split("/");
     const path = pathParts.join("/");
@@ -56,15 +68,51 @@ export default {
       );
     }
 
-    // Log analytics for all content requests (background)
-    ctx.waitUntil(
-      logAnalytics(request, env, {
-        owner,
-        repo: repo || "",
-        page: page ? page : repo ? "tree" : "profile",
-        path,
-      }),
-    );
+    const realPage = page ? page : repo ? "tree" : "profile";
+
+    const pages = [
+      "tree",
+      "blob",
+      "commit",
+      "commits",
+      "issues",
+      "pull",
+      "pulls",
+      "releases",
+      "discussions",
+      "graphs",
+      "settings",
+      "actions",
+      "wiki",
+      "projects",
+      "security",
+      "pulse",
+      "network",
+      "forks",
+      "stargazers",
+      "watchers",
+      "contributors",
+      "community",
+      "branches",
+      "tags",
+      "packages",
+      "deployments",
+      "environments",
+      "compare",
+      "blame",
+      "find",
+    ];
+    if (pages.includes(realPage)) {
+      // Log analytics for all content requests (background)
+      ctx.waitUntil(
+        logAnalytics(request, env, {
+          owner,
+          repo: repo || "",
+          page: realPage,
+          path,
+        }),
+      );
+    }
 
     // User profile page
     if (!repo) {

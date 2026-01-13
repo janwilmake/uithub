@@ -109,8 +109,10 @@ export interface Env {
   STRIPE_PAYMENT_LINK: string;
   STRIPE_PAYMENT_LINK_ID: string;
   STRIPE_WEBHOOK_SIGNING_SECRET: string;
+  PARALLEL_API_KEY: string;
   KV: KVNamespace;
   ANALYTICS_DO: DurableObjectNamespace<import("./analytics").AnalyticsDO>;
+  SOCIALS_DO: DurableObjectNamespace<import("./socials").SocialsDO>;
 }
 
 export interface UserAccount {
