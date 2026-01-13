@@ -78,6 +78,15 @@ export class SocialsDO extends DurableObject<Env> {
     } catch (e) {
       // Column already exists, ignore
     }
+
+    // Migration: add task_started_at column if it doesn't exist
+    try {
+      this.sql.exec(
+        `ALTER TABLE user_socials ADD COLUMN task_started_at INTEGER`,
+      );
+    } catch (e) {
+      // Column already exists, ignore
+    }
   }
 
   async alarm() {
@@ -121,42 +130,54 @@ export class SocialsDO extends DurableObject<Env> {
       return;
     }
 
-    // Include created_at to check for stuck tasks
+    // Include task_started_at to check for stuck tasks
     const runningUsers = this.sql
       .exec(
-        `SELECT github_username, task_run_id, created_at FROM user_socials WHERE resolution_status = 'running' AND task_run_id IS NOT NULL`,
+        `SELECT github_username, task_run_id, task_started_at FROM user_socials WHERE resolution_status = 'running' AND task_run_id IS NOT NULL`,
       )
-      .toArray() as { github_username: string; task_run_id: string; created_at: number }[];
+      .toArray() as {
+      github_username: string;
+      task_run_id: string;
+      task_started_at: number | null;
+    }[];
 
     const now = Date.now();
     const TASK_TIMEOUT_MS = 60 * 60 * 1000; // 1 hour timeout
 
     const results = await Promise.allSettled(
       runningUsers.map(async (user) => {
-        // Check if task has been running too long
-        const taskAge = now - user.created_at;
-        if (taskAge > TASK_TIMEOUT_MS) {
-          const reason = `Task timed out after ${Math.round(taskAge / 60000)} minutes`;
-          this.sql.exec(
-            `UPDATE user_socials SET resolution_status = 'failed', resolved_at = ?, failure_reason = ? WHERE github_username = ?`,
-            now,
-            reason,
-            user.github_username,
-          );
-          console.log(
-            `[SocialsDO] Task timed out for ${user.github_username} (age: ${Math.round(taskAge / 60000)}min)`,
-          );
-          return user.github_username;
+        // Check if task has been running too long (only if we know when it started)
+        if (user.task_started_at) {
+          const taskAge = now - user.task_started_at;
+          if (taskAge > TASK_TIMEOUT_MS) {
+            const reason = `Task timed out after ${Math.round(
+              taskAge / 60000,
+            )} minutes`;
+            this.sql.exec(
+              `UPDATE user_socials SET resolution_status = 'failed', resolved_at = ?, failure_reason = ? WHERE github_username = ?`,
+              now,
+              reason,
+              user.github_username,
+            );
+            console.log(
+              `[SocialsDO] Task timed out for ${
+                user.github_username
+              } (age: ${Math.round(taskAge / 60000)}min)`,
+            );
+            return user.github_username;
+          }
         }
 
-        const response = await fetch(
-          `https://api.parallel.ai/v1/tasks/runs/${user.task_run_id}/result`,
+        // Step 1: Check task status (non-blocking)
+        const statusResponse = await fetch(
+          `https://api.parallel.ai/v1/tasks/runs/${user.task_run_id}`,
           { headers: { "x-api-key": apiKey } },
         );
 
-        // Handle non-200 responses (task expired, deleted, or API error)
-        if (!response.ok) {
-          const reason = `API error: HTTP ${response.status} ${response.statusText}`;
+        if (!statusResponse.ok) {
+          const reason = `Status check failed: HTTP ${
+            statusResponse.status
+          } -- ${await statusResponse.text()}`;
           this.sql.exec(
             `UPDATE user_socials SET resolution_status = 'failed', resolved_at = ?, failure_reason = ? WHERE github_username = ?`,
             now,
@@ -164,32 +185,31 @@ export class SocialsDO extends DurableObject<Env> {
             user.github_username,
           );
           console.log(
-            `[SocialsDO] Task not found for ${user.github_username} (status: ${response.status}), marking as failed`,
+            `[SocialsDO] Status check failed for ${user.github_username} (status: ${statusResponse.status}), marking as failed`,
           );
           return user.github_username;
         }
 
-        const result = (await response.json()) as ParallelTaskResult;
+        const statusResult = (await statusResponse.json()) as {
+          run_id: string;
+          status: string;
+          is_active: boolean;
+          error?: { message: string };
+        };
 
-        if (result.run?.status === "completed" && result.output?.content) {
-          const profiles = result.output.content.profiles || [];
-          const totalFollowers = profiles.reduce(
-            (sum, p) => sum + (p.follower_count || 0),
-            0,
-          );
-
-          this.sql.exec(
-            `UPDATE user_socials SET profiles_json = ?, total_followers = ?, resolved_at = ?, resolution_status = 'completed' WHERE github_username = ?`,
-            JSON.stringify(profiles),
-            totalFollowers,
-            now,
-            user.github_username,
-          );
+        // If still running or queued, leave for next check
+        if (statusResult.status === "running" || statusResult.status === "queued") {
           console.log(
-            `[SocialsDO] Completed resolution for ${user.github_username}, found ${profiles.length} profiles`,
+            `[SocialsDO] Task for ${user.github_username} still ${statusResult.status}`,
           );
-        } else if (result.run?.status === "failed") {
-          const reason = `Task failed: ${(result as any).error?.message || (result as any).run?.error || 'Unknown error'}`;
+          return user.github_username;
+        }
+
+        // If failed, record the error
+        if (statusResult.status === "failed") {
+          const reason = `Task failed: ${
+            statusResult.error?.message || "Unknown error"
+          }`;
           this.sql.exec(
             `UPDATE user_socials SET resolution_status = 'failed', resolved_at = ?, failure_reason = ? WHERE github_username = ?`,
             now,
@@ -199,20 +219,71 @@ export class SocialsDO extends DurableObject<Env> {
           console.log(
             `[SocialsDO] Resolution failed for ${user.github_username}: ${reason}`,
           );
-        } else if (!result.run?.status) {
-          // Malformed response - mark as failed
-          const reason = `Malformed API response: missing run.status`;
-          this.sql.exec(
-            `UPDATE user_socials SET resolution_status = 'failed', resolved_at = ?, failure_reason = ? WHERE github_username = ?`,
-            now,
-            reason,
-            user.github_username,
+          return user.github_username;
+        }
+
+        // Step 2: If completed, fetch the result (should return immediately since task is done)
+        if (statusResult.status === "completed") {
+          const resultResponse = await fetch(
+            `https://api.parallel.ai/v1/tasks/runs/${user.task_run_id}/result`,
+            { headers: { "x-api-key": apiKey } },
           );
+
+          if (!resultResponse.ok) {
+            const reason = `Result fetch failed: HTTP ${
+              resultResponse.status
+            } -- ${await resultResponse.text()}`;
+            this.sql.exec(
+              `UPDATE user_socials SET resolution_status = 'failed', resolved_at = ?, failure_reason = ? WHERE github_username = ?`,
+              now,
+              reason,
+              user.github_username,
+            );
+            console.log(
+              `[SocialsDO] Result fetch failed for ${user.github_username}, marking as failed`,
+            );
+            return user.github_username;
+          }
+
+          const result = (await resultResponse.json()) as ParallelTaskResult;
+
+          if (result.output?.content) {
+            const profiles = result.output.content.profiles || [];
+            const totalFollowers = profiles.reduce(
+              (sum, p) => sum + (p.follower_count || 0),
+              0,
+            );
+
+            this.sql.exec(
+              `UPDATE user_socials SET profiles_json = ?, total_followers = ?, resolved_at = ?, resolution_status = 'completed' WHERE github_username = ?`,
+              JSON.stringify(profiles),
+              totalFollowers,
+              now,
+              user.github_username,
+            );
+            console.log(
+              `[SocialsDO] Completed resolution for ${user.github_username}, found ${profiles.length} profiles`,
+            );
+          } else {
+            // Completed but no output - treat as failed
+            const reason = `Task completed but no output content`;
+            this.sql.exec(
+              `UPDATE user_socials SET resolution_status = 'failed', resolved_at = ?, failure_reason = ? WHERE github_username = ?`,
+              now,
+              reason,
+              user.github_username,
+            );
+            console.log(
+              `[SocialsDO] No output for ${user.github_username}, marking as failed`,
+            );
+          }
+        } else {
+          // Unknown status - log but don't fail
           console.log(
-            `[SocialsDO] Malformed response for ${user.github_username}, marking as failed`,
+            `[SocialsDO] Unknown status '${statusResult.status}' for ${user.github_username}`,
           );
         }
-        // If status is "running" or "pending", leave it for next check
+
         return user.github_username;
       }),
     );
@@ -227,7 +298,7 @@ export class SocialsDO extends DurableObject<Env> {
         );
         // Mark as pending to retry later (not failed, as this might be transient)
         this.sql.exec(
-          `UPDATE user_socials SET resolution_status = 'pending', task_run_id = NULL WHERE github_username = ?`,
+          `UPDATE user_socials SET resolution_status = 'pending', task_run_id = NULL, task_started_at = NULL WHERE github_username = ?`,
           user.github_username,
         );
         console.log(
@@ -373,16 +444,20 @@ IMPORTANT: For each profile, try to extract the follower_count as a number. This
     const result = (await response.json()) as { run_id?: string; error?: any };
 
     if (result.run_id) {
+      const startedAt = Date.now();
       this.sql.exec(
-        `UPDATE user_socials SET resolution_status = 'running', task_run_id = ?, failure_reason = NULL WHERE github_username = ?`,
+        `UPDATE user_socials SET resolution_status = 'running', task_run_id = ?, task_started_at = ?, failure_reason = NULL WHERE github_username = ?`,
         result.run_id,
+        startedAt,
         githubUsername,
       );
       console.log(
         `[SocialsDO] Started resolution for ${githubUsername}, run_id: ${result.run_id}`,
       );
     } else {
-      const reason = `Failed to start task: ${JSON.stringify(result.error) || 'Unknown error'}`;
+      const reason = `Failed to start task: ${
+        JSON.stringify(result.error) || "Unknown error"
+      }`;
       this.sql.exec(
         `UPDATE user_socials SET resolution_status = 'failed', resolved_at = ?, failure_reason = ? WHERE github_username = ?`,
         Date.now(),
@@ -486,12 +561,14 @@ IMPORTANT: For each profile, try to extract the follower_count as a number. This
     };
   }
 
-  async getFailedUsers(limit: number = 100): Promise<{
-    github_username: string;
-    github_url: string;
-    failure_reason: string | null;
-    resolved_at: number | null;
-  }[]> {
+  async getFailedUsers(limit: number = 100): Promise<
+    {
+      github_username: string;
+      github_url: string;
+      failure_reason: string | null;
+      resolved_at: number | null;
+    }[]
+  > {
     const rows = this.sql
       .exec(
         `SELECT github_username, github_url, failure_reason, resolved_at
@@ -502,11 +579,11 @@ IMPORTANT: For each profile, try to extract the follower_count as a number. This
         limit,
       )
       .toArray() as {
-        github_username: string;
-        github_url: string;
-        failure_reason: string | null;
-        resolved_at: number | null;
-      }[];
+      github_username: string;
+      github_url: string;
+      failure_reason: string | null;
+      resolved_at: number | null;
+    }[];
 
     return rows;
   }
@@ -514,11 +591,13 @@ IMPORTANT: For each profile, try to extract the follower_count as a number. This
   async retryFailedUsers(): Promise<{ retried: number }> {
     const result = this.sql.exec(
       `UPDATE user_socials
-       SET resolution_status = 'pending', task_run_id = NULL, failure_reason = NULL
-       WHERE resolution_status = 'failed'`
+       SET resolution_status = 'pending', task_run_id = NULL, task_started_at = NULL, failure_reason = NULL
+       WHERE resolution_status = 'failed'`,
     );
     const retried = result.rowsWritten;
-    console.log(`[SocialsDO] Reset ${retried} failed users to pending for retry`);
+    console.log(
+      `[SocialsDO] Reset ${retried} failed users to pending for retry`,
+    );
     return { retried };
   }
 
@@ -527,13 +606,15 @@ IMPORTANT: For each profile, try to extract the follower_count as a number. This
     for (const username of usernames) {
       const result = this.sql.exec(
         `UPDATE user_socials
-         SET resolution_status = 'pending', task_run_id = NULL, failure_reason = NULL
+         SET resolution_status = 'pending', task_run_id = NULL, task_started_at = NULL, failure_reason = NULL
          WHERE github_username = ? AND resolution_status = 'failed'`,
         username,
       );
       retried += result.rowsWritten;
     }
-    console.log(`[SocialsDO] Reset ${retried} specific failed users to pending`);
+    console.log(
+      `[SocialsDO] Reset ${retried} specific failed users to pending`,
+    );
     return { retried };
   }
 
@@ -546,7 +627,9 @@ IMPORTANT: For each profile, try to extract the follower_count as a number. This
 
       // Check how many are still pending
       const pending = this.sql
-        .exec(`SELECT COUNT(*) as count FROM user_socials WHERE resolution_status = 'pending'`)
+        .exec(
+          `SELECT COUNT(*) as count FROM user_socials WHERE resolution_status = 'pending'`,
+        )
         .toArray()[0]?.count as number;
 
       totalProcessed += 100; // Max per batch
@@ -557,7 +640,7 @@ IMPORTANT: For each profile, try to extract the follower_count as a number. This
     return {
       success: true,
       message: `Manual run completed (up to 5 batches)`,
-      stats
+      stats,
     };
   }
 }
@@ -909,6 +992,58 @@ function generateSocialsHTML(
             )
             .join("")
     }
+
+    ${
+      failedUsers.length > 0
+        ? `
+    <div class="failed-section">
+      <h2>
+        <span>❌ Failed Users (${failedUsers.length})</span>
+        <button class="trigger-btn danger" onclick="retryAllFailed()">Retry All Failed</button>
+        <button class="trigger-btn" onclick="retrySelected()" id="retry-selected-btn" disabled>Retry Selected (0)</button>
+      </h2>
+      <div class="select-all-row">
+        <input type="checkbox" id="select-all" onchange="toggleSelectAll(this)">
+        <label for="select-all">Select All</label>
+      </div>
+      <table class="failed-table">
+        <thead>
+          <tr>
+            <th class="checkbox-cell"></th>
+            <th>Username</th>
+            <th>Failure Reason</th>
+            <th>Failed At</th>
+          </tr>
+        </thead>
+        <tbody>
+          ${failedUsers
+            .map(
+              (u) => `
+          <tr>
+            <td class="checkbox-cell">
+              <input type="checkbox" class="user-checkbox" data-username="${
+                u.github_username
+              }" onchange="updateSelectedCount()">
+            </td>
+            <td><a href="${u.github_url}" target="_blank">${
+                u.github_username
+              }</a></td>
+            <td class="failure-reason">${
+              u.failure_reason || "Unknown reason"
+            }</td>
+            <td>${
+              u.resolved_at ? new Date(u.resolved_at).toLocaleString() : "-"
+            }</td>
+          </tr>
+          `,
+            )
+            .join("")}
+        </tbody>
+      </table>
+    </div>
+    `
+        : ""
+    }
   </div>
   <script>
     const usersData = ${JSON.stringify(
@@ -987,6 +1122,62 @@ function generateSocialsHTML(
         alert('Error: ' + e.message);
       }
     }
+
+    function toggleSelectAll(checkbox) {
+      const checkboxes = document.querySelectorAll('.user-checkbox');
+      checkboxes.forEach(cb => cb.checked = checkbox.checked);
+      updateSelectedCount();
+    }
+
+    function updateSelectedCount() {
+      const checkboxes = document.querySelectorAll('.user-checkbox:checked');
+      const btn = document.getElementById('retry-selected-btn');
+      if (btn) {
+        btn.textContent = 'Retry Selected (' + checkboxes.length + ')';
+        btn.disabled = checkboxes.length === 0;
+      }
+      // Update select-all state
+      const allCheckboxes = document.querySelectorAll('.user-checkbox');
+      const selectAll = document.getElementById('select-all');
+      if (selectAll && allCheckboxes.length > 0) {
+        selectAll.checked = checkboxes.length === allCheckboxes.length;
+        selectAll.indeterminate = checkboxes.length > 0 && checkboxes.length < allCheckboxes.length;
+      }
+    }
+
+    async function retryAllFailed() {
+      if (!confirm('Retry all failed users?')) return;
+      try {
+        const res = await fetch('/socials?retry-failed=1', { method: 'POST' });
+        const data = await res.json();
+        alert(data.message);
+        location.reload();
+      } catch (e) {
+        alert('Error: ' + e.message);
+      }
+    }
+
+    async function retrySelected() {
+      const checkboxes = document.querySelectorAll('.user-checkbox:checked');
+      const usernames = Array.from(checkboxes).map(cb => cb.dataset.username);
+      if (usernames.length === 0) {
+        alert('No users selected');
+        return;
+      }
+      if (!confirm('Retry ' + usernames.length + ' selected users?')) return;
+      try {
+        const res = await fetch('/socials?retry-users=1', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ usernames })
+        });
+        const data = await res.json();
+        alert(data.message);
+        location.reload();
+      } catch (e) {
+        alert('Error: ' + e.message);
+      }
+    }
   </script>
 </body>
 </html>`;
@@ -1014,14 +1205,20 @@ export async function handleSocials(
   // Handle retry all failed
   if (request.method === "POST" && url.searchParams.get("retry-failed")) {
     const result = await stub.retryFailedUsers();
-    return Response.json({ message: `Reset ${result.retried} failed users to pending`, ...result });
+    return Response.json({
+      message: `Reset ${result.retried} failed users to pending`,
+      ...result,
+    });
   }
 
   // Handle retry specific users
   if (request.method === "POST" && url.searchParams.get("retry-users")) {
-    const body = await request.json() as { usernames: string[] };
+    const body = (await request.json()) as { usernames: string[] };
     const result = await stub.retrySpecificUsers(body.usernames || []);
-    return Response.json({ message: `Reset ${result.retried} users to pending`, ...result });
+    return Response.json({
+      message: `Reset ${result.retried} users to pending`,
+      ...result,
+    });
   }
 
   // Sync users from analytics
@@ -1039,7 +1236,7 @@ export async function handleSocials(
   }
 
   const [users, stats, failedUsers] = await Promise.all([
-    stub.getTopUsersBySocialFollowers(50),
+    stub.getTopUsersBySocialFollowers(200),
     stub.getStats(),
     stub.getFailedUsers(100),
   ]);
