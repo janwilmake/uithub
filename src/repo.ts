@@ -26,6 +26,10 @@ type NestedObject<T = null> = {
   [key: string]: NestedObject<T> | T;
 };
 
+type TokenTree = {
+  [key: string]: TokenTree | number;
+};
+
 type ModalState =
   | "login_required"
   | "private_access_required"
@@ -96,7 +100,7 @@ function escapeHTML(str: string): string {
           ">": "&gt;",
           "'": "&#39;",
           '"': "&quot;",
-        }[tag] || tag),
+        })[tag] || tag,
     )
     .replace(/\u0000/g, "\uFFFD")
     .replace(/\u2028/g, "\\u2028")
@@ -142,6 +146,57 @@ function nestedObjectToTreeString<T>(
         newPrefix,
         isLastEntry,
       );
+    }
+  });
+  return result;
+}
+
+function calculateFolderTokens(tree: TokenTree): number {
+  let total = 0;
+  for (const value of Object.values(tree)) {
+    if (typeof value === "number") {
+      total += value;
+    } else {
+      total += calculateFolderTokens(value);
+    }
+  }
+  return total;
+}
+
+function processTokenTree(tree: TokenTree): TokenTree {
+  const result: TokenTree = {};
+  for (const [key, value] of Object.entries(tree)) {
+    if (typeof value === "number") {
+      // Keep all files, but round to nearest 100 (or 0 if under 50)
+      result[key] = Math.round(value / 100) * 100;
+    } else {
+      // Recursively process folder
+      result[key] = processTokenTree(value);
+    }
+  }
+  return result;
+}
+
+function tokenTreeToString(
+  obj: TokenTree,
+  prefix: string = "",
+  isLast: boolean = true,
+): string {
+  let result = "";
+  const entries = Object.entries(obj);
+  entries.forEach(([key, value], index) => {
+    const isLastEntry = index === entries.length - 1;
+    const newPrefix = prefix + (isLast ? "    " : "│   ");
+    if (typeof value === "number") {
+      // File: show token count only if > 100
+      const tokenSuffix = value > 100 ? ` (${value} tokens)` : "";
+      result += `${prefix}${isLastEntry ? "└── " : "├── "}${key}${tokenSuffix}\n`;
+    } else {
+      // Folder: calculate and show total tokens, rounded to nearest 100
+      const folderTokens = Math.round(calculateFolderTokens(value) / 100) * 100;
+      const tokenSuffix = folderTokens > 0 ? ` (${folderTokens} tokens)` : "";
+      result += `${prefix}${isLastEntry ? "└── " : "├── "}${key}/${tokenSuffix}\n`;
+      result += tokenTreeToString(value, newPrefix, isLastEntry);
     }
   });
   return result;
@@ -284,11 +339,49 @@ function stringifyFileContent(
     item.type === "content"
       ? addLineNumbers(item.content || "", shouldAddLineNumbers)
       : item.type === "binary"
-      ? item.url
-      : "";
+        ? item.url
+        : "";
   return `${path}:\n${"-".repeat(80)}\n${contentOrUrl}\n\n\n${"-".repeat(
     80,
   )}\n`;
+}
+
+function calculateFileTokens(
+  path: string,
+  item: ContentType,
+  shouldAddLineNumbers: boolean,
+): number {
+  const contentOrUrl =
+    item.type === "content"
+      ? addLineNumbers(item.content || "", shouldAddLineNumbers)
+      : item.type === "binary"
+        ? item.url
+        : "";
+  const fileString = `${path}:\n${"-".repeat(80)}\n${contentOrUrl}\n\n\n${"-".repeat(80)}\n`;
+  return Math.round(fileString.length / CHARACTERS_PER_TOKEN);
+}
+
+function filePathToTokenTree(
+  flatObject: { [filepath: string]: ContentType },
+  shouldAddLineNumbers: boolean,
+): TokenTree {
+  const result: TokenTree = {};
+  for (const [path, value] of Object.entries(flatObject)) {
+    let parts = path.split("/");
+    parts = parts[0] === "" ? parts.slice(1) : parts;
+    let current: TokenTree = result;
+    for (let i = 0; i < parts.length; i++) {
+      const part = parts[i];
+      if (i === parts.length - 1) {
+        // Leaf node: store token count
+        current[part] = calculateFileTokens(path, value, shouldAddLineNumbers);
+      } else {
+        current[part] = (current[part] as TokenTree) || {};
+        current = current[part] as TokenTree;
+      }
+    }
+  }
+  return result;
 }
 
 function buildTreeAndFileString(
@@ -297,12 +390,15 @@ function buildTreeAndFileString(
   shouldAddLineNumbers: boolean,
 ): {
   tree: NestedObject<null>;
+  tokenTree: TokenTree;
   fileString: string;
   tokens: number;
   treeTokens: number;
 } {
   const tree = filePathToNestedObject({ ...result }, () => null);
-  const treeString = nestedObjectToTreeString(tree);
+  const rawTokenTree = filePathToTokenTree(result, shouldAddLineNumbers);
+  const tokenTree = processTokenTree(rawTokenTree);
+  const treeString = tokenTreeToString(tokenTree);
   const treeTokens = Math.round(treeString.length / CHARACTERS_PER_TOKEN);
 
   const filePart = shouldOmitFiles
@@ -318,7 +414,7 @@ function buildTreeAndFileString(
     (treeString + "\n\n" + filePart).length / CHARACTERS_PER_TOKEN,
   );
 
-  return { tree, fileString, tokens, treeTokens };
+  return { tree, tokenTree, fileString, tokens, treeTokens };
 }
 
 // ==================== MODAL HTML GENERATION ====================
@@ -583,6 +679,7 @@ function generateViewHTML(context: {
   url: URL;
   fileString: string;
   tree: any;
+  tokenTree: any;
   tokens: number;
   totalTokens: number;
   totalLines: number;
@@ -600,6 +697,7 @@ function generateViewHTML(context: {
     totalTokens,
     totalLines,
     tree,
+    tokenTree,
     url,
     default_branch,
     modalState,
@@ -796,8 +894,8 @@ function generateViewHTML(context: {
           ? `
         <div class="user-section">
           <img src="${modalContext.profilePicture}" alt="${
-              modalContext.username
-            }" class="user-avatar">
+            modalContext.username
+          }" class="user-avatar">
           <a href="/dashboard" target="_blank" style="text-decoration:none;">
           <div class="user-info">
             <span class="user-name">@${modalContext.username}</span>
@@ -833,8 +931,8 @@ function generateViewHTML(context: {
       </button>
       
       <a href="${url.origin.replace("uithub.com", "github.com")}${
-    url.pathname
-  }" target="_blank">
+        url.pathname
+      }" target="_blank">
         <svg class="github-icon" viewBox="0 0 16 16" version="1.1" width="32" height="32">
           <path fill="currentColor" d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z" />
         </svg>
@@ -854,6 +952,7 @@ function generateViewHTML(context: {
       totalLines,
     })};
     const tree = ${JSON.stringify(tree)};
+    const tokenTree = ${JSON.stringify(tokenTree)};
     
     const copyButton = document.getElementById('copyButton');
     const buttonText = document.getElementById('buttonText');
@@ -908,7 +1007,8 @@ function generateViewHTML(context: {
       function traverse(node, level = 0) {
         if (typeof node === 'object' && node !== null) {
           for (let key in node) {
-            if (node[key] === null) {
+            // Check if it's a file (number = token count) or folder (object)
+            if (typeof node[key] === 'number') {
               const ext = key.split('.').pop();
               if (ext !== key) extensions.add(ext);
             } else if (level < 4) {
@@ -917,7 +1017,7 @@ function generateViewHTML(context: {
           }
         }
       }
-      traverse(tree);
+      traverse(tokenTree);
       const extSelect = document.getElementById('extSelect');
       extSelect.innerHTML = '<option value="">All Extensions</option>';
       extensions.forEach(ext => {
@@ -927,7 +1027,7 @@ function generateViewHTML(context: {
         extSelect.appendChild(option);
       });
     }
-    
+
     function populateLocations(tree) {
       const locationSelect = document.getElementById('locationSelect');
       locationSelect.innerHTML = '<option value="">Base path: root</option>';
@@ -937,6 +1037,7 @@ function generateViewHTML(context: {
           const option = document.createElement('option');
           option.value = newPath;
           option.textContent = newPath;
+          // Check if it's a folder (object, not a number)
           if (typeof node[key] === 'object' && node[key] !== null) {
             locationSelect.appendChild(option);
             if (level < 3) {
@@ -945,7 +1046,7 @@ function generateViewHTML(context: {
           }
         }
       }
-      traverse(tree);
+      traverse(tokenTree);
     }
     
     function initializeFromURL() {
@@ -1027,6 +1128,7 @@ function buildPlaceholderHtmlResponse(context: {
       ? "Content hidden. Please sign in to continue."
       : "Content hidden. Please complete the required steps first.";
   const placeholderTree = {};
+  const placeholderTokenTree = {};
 
   const branchPart = branch ? ` at ${branch}` : "";
   const title = `${owner}/${repo} - uithub`;
@@ -1041,6 +1143,7 @@ function buildPlaceholderHtmlResponse(context: {
     totalTokens: 0,
     totalLines: 0,
     tree: placeholderTree,
+    tokenTree: placeholderTokenTree,
     default_branch: repoAccess.default_branch,
     modalState,
     modalContext,
@@ -1134,11 +1237,12 @@ function buildSuccessResponse(
   repoAccess: RepoAccess,
   modalContext: ModalContext,
 ): Response {
-  const { tree, fileString, tokens, treeTokens } = buildTreeAndFileString(
-    result.result,
-    params.shouldOmitFiles,
-    params.shouldAddLineNumbers,
-  );
+  const { tree, tokenTree, fileString, tokens, treeTokens } =
+    buildTreeAndFileString(
+      result.result,
+      params.shouldOmitFiles,
+      params.shouldAddLineNumbers,
+    );
 
   if (format.type === "html") {
     const branchPart = branch ? ` at ${branch}` : "";
@@ -1154,6 +1258,7 @@ function buildSuccessResponse(
       totalTokens: result.totalTokens + treeTokens,
       totalLines: result.totalLines,
       tree,
+      tokenTree,
       default_branch: result.shaOrBranch || repoAccess.default_branch,
       modalState: null,
       modalContext,
@@ -1182,7 +1287,7 @@ function buildSuccessResponse(
       characters: (result.totalTokens + treeTokens) * CHARACTERS_PER_TOKEN,
       lines: result.totalLines,
     },
-    tree: params.shouldOmitTree ? undefined : tree,
+    tree: params.shouldOmitTree ? undefined : tokenTree,
     files: params.shouldOmitFiles ? undefined : result.result,
   };
 

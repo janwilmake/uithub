@@ -198,7 +198,10 @@ export class SocialsDO extends DurableObject<Env> {
         };
 
         // If still running or queued, leave for next check
-        if (statusResult.status === "running" || statusResult.status === "queued") {
+        if (
+          statusResult.status === "running" ||
+          statusResult.status === "queued"
+        ) {
           console.log(
             `[SocialsDO] Task for ${user.github_username} still ${statusResult.status}`,
           );
@@ -755,10 +758,12 @@ function generateSocialsHTML(
       height: 48px;
       border-radius: 50%;
       background: #333;
+      filter: blur(2px);
     }
     .user-name {
       font-size: 18px;
       font-weight: 600;
+      filter: blur(4px);
     }
     .user-name a {
       color: #f0f0f0;

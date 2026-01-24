@@ -2,7 +2,7 @@
   "$schema": "https://unpkg.com/wrangler@latest/config-schema.json",
   "name": "uithub-simple",
   "account_id": "080fd9e0587416d2fa30ed1f527e2323",
-  "compatibility_date": "2025-11-30",
+  "compatibility_date": "2026-01-24",
   "main": "src/index.ts",
   "assets": { "directory": "./" },
   "kv_namespaces": [
