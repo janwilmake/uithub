@@ -4,7 +4,7 @@ import {
   parseZipStreaming,
   type StreamingParseContext,
   type ContentType,
-} from "../uithub-lib/src";
+} from "../lib/src";
 
 // ==================== TYPES ====================
 

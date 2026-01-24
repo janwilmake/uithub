@@ -14,7 +14,7 @@ import {
   type TokenTree,
   type NestedObject,
   type UithubOptions,
-} from "../uithub-lib/src";
+} from "../lib/src";
 
 // ==================== CONSTANTS ====================
 
