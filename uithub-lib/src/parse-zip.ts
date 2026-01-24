@@ -1,8 +1,13 @@
 import { parse as parseYaml } from "yaml";
+import {
+  CHARACTERS_PER_TOKEN,
+  type ContentType,
+  type ParseOptions,
+  type ParsedZipResult,
+} from "./types";
 
 // ==================== CONSTANTS ====================
 
-export const CHARACTERS_PER_TOKEN = 5;
 export const DEFAULT_GENIGNORE = `package-lock.json
 build
 node_modules
@@ -12,31 +17,11 @@ node_modules
 const LOCAL_FILE_HEADER = 0x04034b50;
 const CENTRAL_DIR_HEADER = 0x02014b50;
 
-// ==================== TYPES ====================
+// ==================== INTERNAL TYPES ====================
 
-export type ContentType = {
-  type: "content" | "binary";
-  content?: string;
-  url?: string;
-  hash: string;
-  size: number;
-};
-
-export interface StreamingParseContext {
-  owner: string;
-  repo: string;
-  branch?: string;
-  includeExt?: string[];
-  excludeExt?: string[];
-  yamlFilter?: string;
-  paths?: string[];
-  includeDir?: string[];
-  excludeDir?: string[];
-  disableGenignore?: boolean;
-  maxFileSize?: number;
-  matchFilenames?: string[];
-  maxTokens: number;
-  shouldAddLineNumbers: boolean;
+interface CompiledGitignore {
+  accepts: (input: string) => boolean;
+  denies: (input: string) => boolean;
 }
 
 interface ProcessedFile {
@@ -44,11 +29,6 @@ interface ProcessedFile {
   content: ContentType;
   tokens: number;
   lines: number;
-}
-
-interface CompiledGitignore {
-  accepts: (input: string) => boolean;
-  denies: (input: string) => boolean;
 }
 
 // ==================== GITIGNORE PARSER ====================
@@ -179,6 +159,8 @@ async function calculateHash(data: Uint8Array): Promise<string> {
     .map((b) => b.toString(16).padStart(2, "0"))
     .join("");
 }
+
+// ==================== LINE NUMBERS ====================
 
 export function addLineNumbers(
   content: string,
@@ -384,19 +366,16 @@ async function inflateRaw(compressedData: Uint8Array): Promise<Uint8Array> {
 
 // ==================== MAIN ZIP PROCESSOR ====================
 
+export interface StreamingParseContext extends ParseOptions {
+  owner: string;
+  repo: string;
+  branch?: string;
+}
+
 export async function parseZipStreaming(
   stream: ReadableStream<Uint8Array>,
   context: StreamingParseContext,
-): Promise<{
-  status: number;
-  result?: { [path: string]: ContentType };
-  allPaths?: string[];
-  shaOrBranch?: string;
-  message?: string;
-  totalTokens: number;
-  totalLines: number;
-  usedTokens: number;
-}> {
+): Promise<ParsedZipResult> {
   const {
     owner,
     repo,
@@ -411,7 +390,7 @@ export async function parseZipStreaming(
     yamlFilter,
     matchFilenames,
     maxTokens,
-    shouldAddLineNumbers,
+    shouldAddLineNumbers = true,
   } = context;
 
   let yamlParse: any;

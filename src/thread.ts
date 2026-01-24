@@ -4,7 +4,7 @@ import {
   parseZipStreaming,
   type StreamingParseContext,
   type ContentType,
-} from "./parse-zip";
+} from "../uithub-lib/src";
 
 // ==================== TYPES ====================
 
@@ -628,8 +628,8 @@ function generateThreadHTML(
     <div class="content-section">
       <div class="author-info">
         <img src="${thread.author.avatarUrl}" alt="${
-    thread.author.login
-  }" class="avatar">
+          thread.author.login
+        }" class="avatar">
         <div>
           <div class="author-name">@${thread.author.login}</div>
           <div class="timestamp">${new Date(
@@ -655,8 +655,8 @@ function generateThreadHTML(
           <div class="comment">
             <div class="author-info">
               <img src="${comment.author.avatarUrl}" alt="${
-              comment.author.login
-            }" class="avatar">
+                comment.author.login
+              }" class="avatar">
               <div>
                 <div class="author-name">@${comment.author.login}</div>
                 <div class="timestamp">${new Date(

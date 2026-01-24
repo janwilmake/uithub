@@ -8,12 +8,13 @@ import {
   getUser,
 } from "./auth";
 import {
-  parseZipStreaming,
-  addLineNumbers,
+  parseGitHubZip,
   CHARACTERS_PER_TOKEN,
   type ContentType,
-  type StreamingParseContext,
-} from "./parse-zip";
+  type TokenTree,
+  type NestedObject,
+  type UithubOptions,
+} from "../uithub-lib/src";
 
 // ==================== CONSTANTS ====================
 
@@ -21,14 +22,6 @@ const DEFAULT_MAX_TOKENS = 50000;
 const PRIVATE_REPO_COST_CENTS = 1; // $0.01
 
 // ==================== TYPES ====================
-
-type NestedObject<T = null> = {
-  [key: string]: NestedObject<T> | T;
-};
-
-type TokenTree = {
-  [key: string]: TokenTree | number;
-};
 
 type ModalState =
   | "login_required"
@@ -105,101 +98,6 @@ function escapeHTML(str: string): string {
     .replace(/\u0000/g, "\uFFFD")
     .replace(/\u2028/g, "\\u2028")
     .replace(/\u2029/g, "\\u2029");
-}
-
-function filePathToNestedObject<T, U>(
-  flatObject: { [filepath: string]: T },
-  mapper: (value: T) => U,
-): NestedObject<U> {
-  const result: NestedObject<U> = {};
-  for (const [path, value] of Object.entries(flatObject)) {
-    let parts = path.split("/");
-    parts = parts[0] === "" ? parts.slice(1) : parts;
-    let current: NestedObject<U> = result;
-    for (let i = 0; i < parts.length; i++) {
-      const part = parts[i];
-      if (i === parts.length - 1) {
-        current[part] = mapper(value);
-      } else {
-        current[part] = (current[part] as NestedObject<U>) || {};
-        current = current[part] as NestedObject<U>;
-      }
-    }
-  }
-  return result;
-}
-
-function nestedObjectToTreeString<T>(
-  obj: NestedObject<T>,
-  prefix: string = "",
-  isLast: boolean = true,
-): string {
-  let result = "";
-  const entries = Object.entries(obj);
-  entries.forEach(([key, value], index) => {
-    const isLastEntry = index === entries.length - 1;
-    const newPrefix = prefix + (isLast ? "    " : "│   ");
-    result += `${prefix}${isLastEntry ? "└── " : "├── "}${key}\n`;
-    if (typeof value === "object" && value !== null) {
-      result += nestedObjectToTreeString(
-        value as NestedObject<T>,
-        newPrefix,
-        isLastEntry,
-      );
-    }
-  });
-  return result;
-}
-
-function calculateFolderTokens(tree: TokenTree): number {
-  let total = 0;
-  for (const value of Object.values(tree)) {
-    if (typeof value === "number") {
-      total += value;
-    } else {
-      total += calculateFolderTokens(value);
-    }
-  }
-  return total;
-}
-
-function processTokenTree(tree: TokenTree): TokenTree {
-  const result: TokenTree = {};
-  for (const [key, value] of Object.entries(tree)) {
-    if (typeof value === "number") {
-      // Keep all files, but round to nearest 100 (or 0 if under 50)
-      result[key] = Math.round(value / 100) * 100;
-    } else {
-      // Recursively process folder
-      result[key] = processTokenTree(value);
-    }
-  }
-  return result;
-}
-
-function tokenTreeToString(
-  obj: TokenTree,
-  prefix: string = "",
-  isLast: boolean = true,
-): string {
-  let result = "";
-  const entries = Object.entries(obj);
-  entries.forEach(([key, value], index) => {
-    const isLastEntry = index === entries.length - 1;
-    const newPrefix = prefix + (isLast ? "    " : "│   ");
-    if (typeof value === "number") {
-      // File: show token count only if > 100
-      const tokenSuffix = value > 100 ? ` (${value} tokens)` : "";
-      result += `${prefix}${isLastEntry ? "└── " : "├── "}${key}${tokenSuffix}\n`;
-    } else {
-      // Folder: calculate and show total tokens, rounded to nearest 100
-      const folderTokens = Math.round(calculateFolderTokens(value) / 100) * 100;
-      const tokenSuffix = folderTokens > 0 ? ` (${folderTokens} tokens)` : "";
-      result += `${prefix}${isLastEntry ? "└── " : "├── "}${key}/${tokenSuffix}\n`;
-      result += tokenTreeToString(value, newPrefix, isLastEntry);
-    }
-  });
-  return result;
 }
 
 // ==================== MODAL STATE LOGIC ====================
@@ -326,95 +224,6 @@ async function checkRepoAccess(
     isPrivate: data.private || false,
     default_branch: data.default_branch,
   };
-}
-
-// ==================== TREE AND FILE STRING BUILDING ====================
-
-function stringifyFileContent(
-  path: string,
-  item: ContentType,
-  shouldAddLineNumbers: boolean,
-): string {
-  const contentOrUrl =
-    item.type === "content"
-      ? addLineNumbers(item.content || "", shouldAddLineNumbers)
-      : item.type === "binary"
-        ? item.url
-        : "";
-  return `${path}:\n${"-".repeat(80)}\n${contentOrUrl}\n\n\n${"-".repeat(
-    80,
-  )}\n`;
-}
-
-function calculateFileTokens(
-  path: string,
-  item: ContentType,
-  shouldAddLineNumbers: boolean,
-): number {
-  const contentOrUrl =
-    item.type === "content"
-      ? addLineNumbers(item.content || "", shouldAddLineNumbers)
-      : item.type === "binary"
-        ? item.url
-        : "";
-  const fileString = `${path}:\n${"-".repeat(80)}\n${contentOrUrl}\n\n\n${"-".repeat(80)}\n`;
-  return Math.round(fileString.length / CHARACTERS_PER_TOKEN);
-}
-
-function filePathToTokenTree(
-  flatObject: { [filepath: string]: ContentType },
-  shouldAddLineNumbers: boolean,
-): TokenTree {
-  const result: TokenTree = {};
-  for (const [path, value] of Object.entries(flatObject)) {
-    let parts = path.split("/");
-    parts = parts[0] === "" ? parts.slice(1) : parts;
-    let current: TokenTree = result;
-    for (let i = 0; i < parts.length; i++) {
-      const part = parts[i];
-      if (i === parts.length - 1) {
-        // Leaf node: store token count
-        current[part] = calculateFileTokens(path, value, shouldAddLineNumbers);
-      } else {
-        current[part] = (current[part] as TokenTree) || {};
-        current = current[part] as TokenTree;
-      }
-    }
-  }
-  return result;
-}
-
-function buildTreeAndFileString(
-  result: { [path: string]: ContentType },
-  shouldOmitFiles: boolean,
-  shouldAddLineNumbers: boolean,
-): {
-  tree: NestedObject<null>;
-  tokenTree: TokenTree;
-  fileString: string;
-  tokens: number;
-  treeTokens: number;
-} {
-  const tree = filePathToNestedObject({ ...result }, () => null);
-  const rawTokenTree = filePathToTokenTree(result, shouldAddLineNumbers);
-  const tokenTree = processTokenTree(rawTokenTree);
-  const treeString = tokenTreeToString(tokenTree);
-  const treeTokens = Math.round(treeString.length / CHARACTERS_PER_TOKEN);
-
-  const filePart = shouldOmitFiles
-    ? ""
-    : Object.keys(result)
-        .map((path) =>
-          stringifyFileContent(path, result[path], shouldAddLineNumbers),
-        )
-        .join("");
-
-  const fileString = treeString + (shouldOmitFiles ? "" : "\n\n" + filePart);
-  const tokens = Math.round(
-    (treeString + "\n\n" + filePart).length / CHARACTERS_PER_TOKEN,
-  );
-
-  return { tree, tokenTree, fileString, tokens, treeTokens };
 }
 
 // ==================== MODAL HTML GENERATION ====================
@@ -703,16 +512,11 @@ function generateViewHTML(context: {
     modalState,
     modalContext,
   } = context;
-  const [_, owner, repo, page, branch, ...pathParts] = url.pathname.split("/");
-
   const contentBlurStyle = modalState
     ? "pointer-events: none; user-select: none;"
     : "";
 
   const isLoggedIn = !!modalContext.username;
-  const logoutUrl = `/logout?redirect_to=${encodeURIComponent(
-    url.pathname + url.search,
-  )}`;
 
   return `<!DOCTYPE html>
 <html lang="en">
@@ -741,12 +545,12 @@ function generateViewHTML(context: {
       }
       a { color: white; }
     }
-    body { 
-      margin: 0; 
-      font-family: Arial, sans-serif; 
-      padding-top: 100px; 
-      background-color: var(--bg-color); 
-      color: var(--text-color); 
+    body {
+      margin: 0;
+      font-family: Arial, sans-serif;
+      padding-top: 100px;
+      background-color: var(--bg-color);
+      color: var(--text-color);
     }
     header {
       background-color: var(--header-bg);
@@ -800,16 +604,16 @@ function generateViewHTML(context: {
       background: rgba(255, 255, 255, 0.08);
       border-color: rgba(255, 255, 255, 0.2);
     }
-    .icon { 
-      width: 16px; 
-      height: 16px; 
-      stroke: currentColor; 
-      fill: none; 
-      stroke-width: 2; 
+    .icon {
+      width: 16px;
+      height: 16px;
+      stroke: currentColor;
+      fill: none;
+      stroke-width: 2;
     }
-    textarea { 
-      position: absolute; 
-      left: -9999px; 
+    textarea {
+      position: absolute;
+      left: -9999px;
     }
     .content-container {
       ${contentBlurStyle}
@@ -844,7 +648,7 @@ function generateViewHTML(context: {
       color: #22c55e;
       font-weight: 500;
      }
-    
+
     .login-btn {
       background: linear-gradient(135deg, #8b5cf6 0%, #ec4899 100%);
       border: none;
@@ -908,7 +712,7 @@ function generateViewHTML(context: {
             }
           </div>
           </a>
-          
+
         </div>
       `
           : `
@@ -921,7 +725,7 @@ function generateViewHTML(context: {
       `
       }
       <p id="tokens">~${tokens} tokens</p>
-      
+
       <button class="copy-button" id="copyButton">
         <svg class="icon" viewBox="0 0 24 24">
           <rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect>
@@ -929,7 +733,7 @@ function generateViewHTML(context: {
         </svg>
         <span id="buttonText">Copy page</span>
       </button>
-      
+
       <a href="${url.origin.replace("uithub.com", "github.com")}${
         url.pathname
       }" target="_blank">
@@ -942,9 +746,9 @@ function generateViewHTML(context: {
   <div class="content-container" style="max-width: 100vw; margin-top:35px;">
     <pre id="textToCopy">${escapeHTML(fileString)}</pre>
   </div>
-  
+
   <textarea id="copyContent">${escapeHTML(fileString)}</textarea>
-  
+
   <script>
     const data = ${JSON.stringify({
       default_branch,
@@ -953,11 +757,11 @@ function generateViewHTML(context: {
     })};
     const tree = ${JSON.stringify(tree)};
     const tokenTree = ${JSON.stringify(tokenTree)};
-    
+
     const copyButton = document.getElementById('copyButton');
     const buttonText = document.getElementById('buttonText');
     const copyContent = document.getElementById('copyContent');
-    
+
     copyButton.addEventListener('click', () => {
       copyContent.select();
       document.execCommand('copy');
@@ -965,35 +769,35 @@ function generateViewHTML(context: {
       buttonText.textContent = 'Copied';
       setTimeout(() => { buttonText.textContent = originalText; }, 1000);
     });
-    
+
     function updateFilters() {
       const format = document.getElementById('formatSelect').value;
       const maxTokens = document.getElementById('maxTokensInput').value;
       const ext = document.getElementById('extSelect').value;
       let url = new URL(window.location.href);
-      
+
       if (format) {
         url.searchParams.set('accept', format);
       } else {
         url.searchParams.delete('accept');
       }
-      
+
       if (maxTokens && maxTokens.trim() !== '') {
         url.searchParams.set('maxTokens', maxTokens);
       } else {
         // Set to large default instead of deleting
-        url.searchParams.set('maxTokens', '10000000'); 
+        url.searchParams.set('maxTokens', '10000000');
       }
-      
+
       if (ext) {
         url.searchParams.set('ext', ext);
       } else {
         url.searchParams.delete('ext');
       }
-      
+
       window.location.href = url.toString();
     }
-    
+
     function navigateToLocation() {
       const location = document.getElementById('locationSelect').value;
       let url = new URL(window.location.href);
@@ -1001,7 +805,7 @@ function generateViewHTML(context: {
       const locationPart = location === "" ? "" : "/" + location;
       window.location.href = url.origin + "/" + owner + "/" + repo + "/tree/" + (branch || data.default_branch || "main") + locationPart + url.search;
     }
-    
+
     function populateExtensions(tree) {
       const extensions = new Set();
       function traverse(node, level = 0) {
@@ -1048,7 +852,7 @@ function generateViewHTML(context: {
       }
       traverse(tokenTree);
     }
-    
+
     function initializeFromURL() {
       const url = new URL(window.location.href);
       const format = url.searchParams.get('accept') || "";
@@ -1059,7 +863,7 @@ function generateViewHTML(context: {
       const path = pathParts.join("/");
       document.getElementById('locationSelect').value = path;
     }
-    
+
     window.onload = function () {
       populateExtensions(tree);
       populateLocations(tree);
@@ -1159,24 +963,16 @@ function buildPlaceholderHtmlResponse(context: {
   });
 }
 
-async function fetchAndProcessRepo(
+async function fetchZipStream(
   owner: string,
   repo: string,
   branch: string | undefined,
-  path: string,
   githubAccessToken: string | null,
   repoAccess: RepoAccess,
-  params: RepoRequestParams,
-): Promise<{
-  status: number;
-  result?: { [path: string]: ContentType };
-  allPaths?: string[];
-  shaOrBranch?: string;
-  message?: string;
-  totalTokens: number;
-  totalLines: number;
-  usedTokens: number;
-}> {
+): Promise<
+  | { stream: ReadableStream<Uint8Array>; status: number }
+  | { error: string; status: number }
+> {
   const ref = branch && branch !== "" ? branch : "HEAD";
   const isPrivate = !!githubAccessToken && repoAccess.isPrivate;
   const branchSuffix = branch && branch !== "" ? `/${branch}` : "";
@@ -1192,41 +988,24 @@ async function fetchAndProcessRepo(
   const response = await fetch(apiUrl, { headers });
   if (!response.ok || !response.body) {
     return {
+      error: `Failed to fetch repository: ${response.status}`,
       status: response.status,
-      message: `Failed to fetch repository: ${response.status}`,
-      totalTokens: 0,
-      totalLines: 0,
-      usedTokens: 0,
     };
   }
 
-  const parseContext: StreamingParseContext = {
-    owner,
-    repo,
-    branch,
-    excludeDir: params.excludeDir,
-    excludeExt: params.excludeExt,
-    includeDir: params.includeDir,
-    includeExt: params.includeExt,
-    yamlFilter: params.yamlFilter,
-    matchFilenames: params.matchFilenames,
-    paths: path ? [path] : undefined,
-    disableGenignore: params.disableGenignore,
-    maxFileSize: params.maxFileSize,
-    maxTokens: params.maxTokens,
-    shouldAddLineNumbers: params.shouldAddLineNumbers,
-  };
-
-  return await parseZipStreaming(response.body, parseContext);
+  return { stream: response.body, status: 200 };
 }
 
 function buildSuccessResponse(
   format: ResponseFormat,
   result: {
-    result: { [path: string]: ContentType };
+    files: { [path: string]: ContentType };
+    tree: NestedObject<null>;
+    tokenTree: TokenTree;
+    fileString: string;
+    tokens: number;
     totalTokens: number;
     totalLines: number;
-    shaOrBranch?: string;
   },
   params: RepoRequestParams,
   url: URL,
@@ -1236,30 +1015,24 @@ function buildSuccessResponse(
   path: string,
   repoAccess: RepoAccess,
   modalContext: ModalContext,
+  shaOrBranch?: string,
 ): Response {
-  const { tree, tokenTree, fileString, tokens, treeTokens } =
-    buildTreeAndFileString(
-      result.result,
-      params.shouldOmitFiles,
-      params.shouldAddLineNumbers,
-    );
-
   if (format.type === "html") {
     const branchPart = branch ? ` at ${branch}` : "";
     const title = `${owner}/${repo} - uithub`;
-    const description = `LLM context for ${repo}. /${path}${branchPart} contains ${tokens} tokens.`;
+    const description = `LLM context for ${repo}. /${path}${branchPart} contains ${result.tokens} tokens.`;
 
     const viewHtml = generateViewHTML({
       url,
       title,
       description,
-      fileString,
-      tokens,
-      totalTokens: result.totalTokens + treeTokens,
+      fileString: result.fileString,
+      tokens: result.tokens,
+      totalTokens: result.totalTokens,
       totalLines: result.totalLines,
-      tree,
-      tokenTree,
-      default_branch: result.shaOrBranch || repoAccess.default_branch,
+      tree: result.tree,
+      tokenTree: result.tokenTree,
+      default_branch: shaOrBranch || repoAccess.default_branch,
       modalState: null,
       modalContext,
     });
@@ -1275,20 +1048,20 @@ function buildSuccessResponse(
   }
 
   if (format.type === "markdown") {
-    return new Response(fileString, {
+    return new Response(result.fileString, {
       headers: { "Content-Type": "text/markdown; charset=utf-8" },
     });
   }
 
   const body = {
     size: {
-      tokens,
-      totalTokens: result.totalTokens + treeTokens,
-      characters: (result.totalTokens + treeTokens) * CHARACTERS_PER_TOKEN,
+      tokens: result.tokens,
+      totalTokens: result.totalTokens,
+      characters: result.totalTokens * CHARACTERS_PER_TOKEN,
       lines: result.totalLines,
     },
-    tree: params.shouldOmitTree ? undefined : tokenTree,
-    files: params.shouldOmitFiles ? undefined : result.result,
+    tree: params.shouldOmitTree ? undefined : result.tokenTree,
+    files: params.shouldOmitFiles ? undefined : result.files,
   };
 
   if (format.type === "yaml") {
@@ -1309,7 +1082,7 @@ export async function handleRepoEndpoint(
   env: Env,
 ): Promise<Response> {
   const url = new URL(request.url);
-  const [_, owner, repo, page, branch, ...pathParts] = url.pathname.split("/");
+  const [_, owner, repo, _page, branch, ...pathParts] = url.pathname.split("/");
   const path = pathParts.join("/");
 
   const { currentUser, githubAccessToken, sessionScopes } = await getUser(
@@ -1373,7 +1146,7 @@ export async function handleRepoEndpoint(
     sessionScopes.includes("repo")
   ) {
     const chargeResult = await chargeForPrivateRepo(
-      String(currentUser.id),
+      String(currentUser!.id),
       env,
     );
     if (!chargeResult.success) {
@@ -1385,26 +1158,46 @@ export async function handleRepoEndpoint(
   const params = parseRepoRequestParams(url);
 
   try {
-    const result = await fetchAndProcessRepo(
+    const fetchResult = await fetchZipStream(
       owner,
       repo,
       branch,
-      path,
       githubAccessToken,
       repoAccess,
-      params,
     );
 
-    if (!result.result) {
-      return new Response(result.message || "Error processing repository", {
-        status: result.status,
-      });
+    if ("error" in fetchResult) {
+      return new Response(fetchResult.error, { status: fetchResult.status });
     }
+
+    const options: UithubOptions = {
+      maxTokens: params.maxTokens,
+      includeExt: params.includeExt,
+      excludeExt: params.excludeExt,
+      includeDir: params.includeDir,
+      excludeDir: params.excludeDir,
+      matchFilenames: params.matchFilenames,
+      paths: path ? [path] : undefined,
+      disableGenignore: params.disableGenignore,
+      maxFileSize: params.maxFileSize,
+      yamlFilter: params.yamlFilter,
+      shouldAddLineNumbers: params.shouldAddLineNumbers,
+      shouldOmitFiles: params.shouldOmitFiles,
+      shouldOmitTree: params.shouldOmitTree,
+    };
+
+    const result = await parseGitHubZip(
+      fetchResult.stream,
+      owner,
+      repo,
+      branch,
+      options,
+    );
 
     // Build and return response
     return buildSuccessResponse(
       responseFormat,
-      result as any,
+      result,
       params,
       url,
       owner,
@@ -1413,6 +1206,7 @@ export async function handleRepoEndpoint(
       path,
       repoAccess,
       modalContext,
+      branch || repoAccess.default_branch,
     );
   } catch (e: any) {
     return new Response(`Error: ${e.message}`, { status: 500 });
