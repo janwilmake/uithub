@@ -33,6 +33,20 @@ export interface ParseOptions {
   maxTokens: number;
   yamlFilter?: string;
 
+  // Glob patterns (VS Code style)
+  /** Glob patterns for files to include (e.g., "**\/*.ts", "src/**") */
+  include?: string[];
+  /** Glob patterns for files to exclude (e.g., "** /node_modules/**", "** /*.test.ts") */
+  exclude?: string[];
+
+  // Search options
+  /** Search string to filter files by content */
+  search?: string;
+  /** Whether search should be case-sensitive (default: false) */
+  searchMatchCase?: boolean;
+  /** Whether search string is a regular expression (default: false) */
+  searchRegularExp?: boolean;
+
   // Formatting
   shouldAddLineNumbers?: boolean;
 }

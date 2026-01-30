@@ -26,7 +26,14 @@ export {
 };
 
 // Re-export utilities that might be useful
-export { addLineNumbers, calculateFileTokens, parseZipStreaming } from "./parse-zip";
+export {
+  addLineNumbers,
+  calculateFileTokens,
+  contentMatchesSearch,
+  matchesGlobPatterns,
+  parseZipStreaming,
+  type SearchOptions,
+} from "./parse-zip";
 export {
   filePathToNestedObject,
   filePathToTokenTree,
@@ -73,6 +80,13 @@ export async function parseGitHubZip(
     maxFileSize: options.maxFileSize,
     maxTokens: options.maxTokens,
     shouldAddLineNumbers: options.shouldAddLineNumbers ?? true,
+    // Glob patterns (VS Code style)
+    include: options.include,
+    exclude: options.exclude,
+    // Search options
+    search: options.search,
+    searchMatchCase: options.searchMatchCase,
+    searchRegularExp: options.searchRegularExp,
   };
 
   const parseResult = await parseZipStreaming(zipStream, parseContext);

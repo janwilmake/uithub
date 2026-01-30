@@ -31,6 +31,181 @@ interface ProcessedFile {
   lines: number;
 }
 
+// ==================== GLOB PATTERN MATCHING ====================
+
+/**
+ * Converts a glob pattern to a regular expression.
+ * Supports:
+ * - * matches any single path segment (not /)
+ * - ** matches any number of path segments (including /)
+ * - ? matches any single character
+ * - [abc] matches any character in brackets
+ * - [!abc] or [^abc] matches any character not in brackets
+ * - {a,b,c} matches any of the alternatives
+ */
+function globToRegex(pattern: string): RegExp {
+  let regexStr = "";
+  let i = 0;
+
+  // Normalize pattern: remove leading ./ if present
+  if (pattern.startsWith("./")) {
+    pattern = pattern.slice(2);
+  }
+
+  while (i < pattern.length) {
+    const char = pattern[i];
+
+    if (char === "*") {
+      if (pattern[i + 1] === "*") {
+        // ** - matches any path segments
+        if (pattern[i + 2] === "/") {
+          // **/  matches zero or more directories
+          regexStr += "(?:.+/)?";
+          i += 3;
+        } else if (i + 2 === pattern.length) {
+          // ** at end matches everything
+          regexStr += ".*";
+          i += 2;
+        } else {
+          // ** in middle
+          regexStr += ".*";
+          i += 2;
+        }
+      } else {
+        // * - matches any single path segment (not /)
+        regexStr += "[^/]*";
+        i++;
+      }
+    } else if (char === "?") {
+      regexStr += "[^/]";
+      i++;
+    } else if (char === "[") {
+      // Character class
+      let j = i + 1;
+      let charClass = "[";
+      if (pattern[j] === "!" || pattern[j] === "^") {
+        charClass += "^";
+        j++;
+      }
+      while (j < pattern.length && pattern[j] !== "]") {
+        if (pattern[j] === "\\") {
+          charClass += "\\" + (pattern[j + 1] || "");
+          j += 2;
+        } else {
+          charClass += pattern[j];
+          j++;
+        }
+      }
+      charClass += "]";
+      regexStr += charClass;
+      i = j + 1;
+    } else if (char === "{") {
+      // Brace expansion {a,b,c}
+      let j = i + 1;
+      const alternatives: string[] = [];
+      let current = "";
+      let depth = 1;
+      while (j < pattern.length && depth > 0) {
+        if (pattern[j] === "{") {
+          depth++;
+          current += pattern[j];
+        } else if (pattern[j] === "}") {
+          depth--;
+          if (depth === 0) {
+            alternatives.push(current);
+          } else {
+            current += pattern[j];
+          }
+        } else if (pattern[j] === "," && depth === 1) {
+          alternatives.push(current);
+          current = "";
+        } else {
+          current += pattern[j];
+        }
+        j++;
+      }
+      regexStr +=
+        "(?:" + alternatives.map((alt) => escapeRegexChar(alt)).join("|") + ")";
+      i = j;
+    } else if ("/\\.+^$|()".includes(char)) {
+      // Escape special regex characters
+      regexStr += "\\" + char;
+      i++;
+    } else {
+      regexStr += char;
+      i++;
+    }
+  }
+
+  return new RegExp("^" + regexStr + "$");
+}
+
+function escapeRegexChar(str: string): string {
+  return str.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+/**
+ * Check if a file path matches any of the given glob patterns.
+ */
+export function matchesGlobPatterns(
+  filePath: string,
+  patterns: string[],
+): boolean {
+  // Normalize path: remove leading / if present
+  const normalizedPath = filePath.startsWith("/") ? filePath.slice(1) : filePath;
+
+  for (const pattern of patterns) {
+    const regex = globToRegex(pattern);
+    if (regex.test(normalizedPath)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+// ==================== SEARCH UTILITIES ====================
+
+export interface SearchOptions {
+  search?: string;
+  searchMatchCase?: boolean;
+  searchRegularExp?: boolean;
+}
+
+/**
+ * Check if content matches the search criteria.
+ */
+export function contentMatchesSearch(
+  content: string,
+  options: SearchOptions,
+): boolean {
+  if (!options.search) return true;
+
+  if (options.searchRegularExp) {
+    try {
+      const flags = options.searchMatchCase ? "g" : "gi";
+      const regex = new RegExp(options.search, flags);
+      return regex.test(content);
+    } catch {
+      // Invalid regex, treat as literal string
+      return contentMatchesLiteral(content, options.search, options.searchMatchCase);
+    }
+  } else {
+    return contentMatchesLiteral(content, options.search, options.searchMatchCase);
+  }
+}
+
+function contentMatchesLiteral(
+  content: string,
+  search: string,
+  matchCase?: boolean,
+): boolean {
+  if (matchCase) {
+    return content.includes(search);
+  } else {
+    return content.toLowerCase().includes(search.toLowerCase());
+  }
+}
+
 // ==================== GITIGNORE PARSER ====================
 
 function escapeRegex(pattern: string): string {
@@ -154,7 +329,7 @@ function isValidUtf8(data: Uint8Array): boolean {
 }
 
 async function calculateHash(data: Uint8Array): Promise<string> {
-  const hashBuffer = await crypto.subtle.digest("SHA-256", data);
+  const hashBuffer = await crypto.subtle.digest("SHA-256", data as unknown as BufferSource);
   return Array.from(new Uint8Array(hashBuffer))
     .map((b) => b.toString(16).padStart(2, "0"))
     .join("");
@@ -341,7 +516,7 @@ async function inflateRaw(compressedData: Uint8Array): Promise<Uint8Array> {
   const writer = ds.writable.getWriter();
   const reader = ds.readable.getReader();
 
-  writer.write(compressedData);
+  writer.write(compressedData as unknown as BufferSource);
   writer.close();
 
   const chunks: Uint8Array[] = [];
@@ -391,6 +566,13 @@ export async function parseZipStreaming(
     matchFilenames,
     maxTokens,
     shouldAddLineNumbers = true,
+    // Glob patterns
+    include,
+    exclude,
+    // Search options
+    search,
+    searchMatchCase,
+    searchRegularExp,
   } = context;
 
   let yamlParse: any;
@@ -451,6 +633,22 @@ export async function parseZipStreaming(
         continue;
       }
 
+      // Apply glob include patterns - if specified, file must match at least one
+      if (include && include.length > 0) {
+        if (!matchesGlobPatterns(filePath, include)) {
+          await entry.getData();
+          continue;
+        }
+      }
+
+      // Apply glob exclude patterns - if file matches any, skip it
+      if (exclude && exclude.length > 0) {
+        if (matchesGlobPatterns(filePath, exclude)) {
+          await entry.getData();
+          continue;
+        }
+      }
+
       const data = await entry.getData();
       if (!data) continue;
 
@@ -475,6 +673,12 @@ export async function parseZipStreaming(
   let totalTokens = 0;
   let totalLines = 0;
 
+  const searchOptions: SearchOptions = {
+    search,
+    searchMatchCase,
+    searchRegularExp,
+  };
+
   for (const [filePath, { data, isText }] of allFiles) {
     if (genignore && !genignore.accepts(filePath)) {
       continue;
@@ -484,6 +688,11 @@ export async function parseZipStreaming(
 
     if (isText) {
       const content = new TextDecoder("utf-8").decode(data);
+
+      // Apply search filter - skip files that don't match
+      if (search && !contentMatchesSearch(content, searchOptions)) {
+        continue;
+      }
       const tokens = calculateFileTokens(
         "/" + filePath,
         content,

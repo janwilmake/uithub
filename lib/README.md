@@ -64,6 +64,15 @@ interface UithubOptions {
   paths?: string[];            // Only include files under these paths
   maxFileSize?: number;        // Skip files larger than this (bytes)
 
+  // Glob patterns (VS Code style)
+  include?: string[];          // Glob patterns for files to include
+  exclude?: string[];          // Glob patterns for files to exclude
+
+  // Content search
+  search?: string;             // Search string to filter files by content
+  searchMatchCase?: boolean;   // Case-sensitive search (default: false)
+  searchRegularExp?: boolean;  // Treat search as regex (default: false)
+
   // Special filters
   yamlFilter?: string;         // YAML structure to filter files
   disableGenignore?: boolean;  // Disable .genignore processing
@@ -143,6 +152,94 @@ await parseGitHubZip(stream, owner, repo, branch, {
 });
 ```
 
+### Glob Patterns (VS Code Style)
+
+Use `include` and `exclude` for powerful glob pattern matching, similar to VS Code's file search:
+
+```typescript
+// Only TypeScript files in src
+await parseGitHubZip(stream, owner, repo, branch, {
+  maxTokens: 50000,
+  include: ["src/**/*.ts", "src/**/*.tsx"]
+});
+
+// Exclude test files and node_modules
+await parseGitHubZip(stream, owner, repo, branch, {
+  maxTokens: 50000,
+  exclude: ["**/*.test.ts", "**/*.spec.ts", "**/node_modules/**"]
+});
+
+// Combine include and exclude
+await parseGitHubZip(stream, owner, repo, branch, {
+  maxTokens: 50000,
+  include: ["src/**"],
+  exclude: ["**/*.test.ts"]
+});
+```
+
+**Supported glob syntax:**
+
+| Pattern | Description |
+|---------|-------------|
+| `*` | Matches any characters except `/` |
+| `**` | Matches any characters including `/` (any path depth) |
+| `?` | Matches any single character except `/` |
+| `[abc]` | Matches any character in brackets |
+| `[!abc]` | Matches any character not in brackets |
+| `{a,b,c}` | Matches any of the alternatives |
+
+**Examples:**
+
+| Pattern | Matches |
+|---------|---------|
+| `*.ts` | `index.ts`, `utils.ts` (root only) |
+| `**/*.ts` | All `.ts` files at any depth |
+| `src/**` | Everything in `src/` directory |
+| `**/test/**` | Any file under any `test/` directory |
+| `*.{ts,tsx}` | Files ending in `.ts` or `.tsx` |
+| `src/[abc]*.ts` | `src/a.ts`, `src/b.ts`, `src/c.ts` |
+
+## Content Search
+
+Filter files by their content using the `search` option:
+
+```typescript
+// Find files containing "TODO"
+await parseGitHubZip(stream, owner, repo, branch, {
+  maxTokens: 50000,
+  search: "TODO"
+});
+
+// Case-sensitive search
+await parseGitHubZip(stream, owner, repo, branch, {
+  maxTokens: 50000,
+  search: "MyClass",
+  searchMatchCase: true
+});
+
+// Regular expression search
+await parseGitHubZip(stream, owner, repo, branch, {
+  maxTokens: 50000,
+  search: "function\\s+\\w+",
+  searchRegularExp: true
+});
+
+// Find React components with useState
+await parseGitHubZip(stream, owner, repo, branch, {
+  maxTokens: 50000,
+  include: ["**/*.tsx"],
+  search: "useState",
+});
+```
+
+**Search options:**
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `search` | `string` | - | Search string or regex pattern |
+| `searchMatchCase` | `boolean` | `false` | Enable case-sensitive matching |
+| `searchRegularExp` | `boolean` | `false` | Treat search string as a regular expression |
+
 ## .genignore Support
 
 The library automatically respects `.genignore` files in repositories. This works like `.gitignore` but is specifically for controlling what content is exposed to LLMs/AI tools.
@@ -211,6 +308,8 @@ import {
   parseZipStreaming,
   addLineNumbers,
   calculateFileTokens,
+  matchesGlobPatterns,      // Check if path matches glob patterns
+  contentMatchesSearch,     // Check if content matches search criteria
 
   // Formatting utilities
   formatRepoContent,
@@ -226,6 +325,7 @@ import {
   type NestedObject,
   type TokenTree,
   type StreamingParseContext,
+  type SearchOptions,       // Options for content search
 
   // Constants
   CHARACTERS_PER_TOKEN  // Default: 5

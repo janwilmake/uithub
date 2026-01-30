@@ -1,13 +1,19 @@
 {
   "name": "@janwilmake/uithub",
-  "version": "0.0.3",
+  "version": "0.0.5",
+  "type": "module",
   "main": "build/index.js",
   "types": "build/index.d.ts",
   "scripts": {
     "build": "tsc --outDir build --declaration --module esnext --moduleResolution bundler --target esnext src/index.ts src/parse-zip.ts src/format.ts src/types.ts",
+    "test": "tsx --test tests/*.test.ts",
     "pub": "npm publish --access=public"
   },
   "dependencies": {
     "yaml": "^2.8.2"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "tsx": "^4.0.0"
   }
 }
