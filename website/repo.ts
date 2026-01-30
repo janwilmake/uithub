@@ -8,13 +8,12 @@ import {
   getUser,
 } from "./auth";
 import {
-  parseGitHubZip,
   CHARACTERS_PER_TOKEN,
   type ContentType,
   type TokenTree,
   type NestedObject,
-  type UithubOptions,
 } from "../lib/src";
+import type { FileRecord } from "./files-do";
 
 // ==================== CONSTANTS ====================
 
@@ -1313,6 +1312,146 @@ function buildSuccessResponse(
   });
 }
 
+// ==================== FILEDO RESULT TO UITHUB RESULT ====================
+
+function fileRecordsToUithubResult(
+  records: FileRecord[],
+  params: RepoRequestParams,
+): {
+  files: { [path: string]: ContentType };
+  tree: NestedObject<null>;
+  tokenTree: TokenTree;
+  fileString: string;
+  tokens: number;
+  totalTokens: number;
+  totalLines: number;
+} {
+  const files: { [path: string]: ContentType } = {};
+  const tree: NestedObject<null> = {};
+  const tokenTree: TokenTree = {};
+
+  let totalTokens = 0;
+  let totalLines = 0;
+
+  // Records are already pre-filtered and within token budget from DO
+  for (const record of records) {
+    const tokens = record.tokens;
+    totalTokens += tokens;
+
+    if (record.is_binary || !record.content) {
+      // Binary file
+      files[record.path] = {
+        type: "binary",
+        content: undefined,
+        hash: "",
+        size: record.size,
+        url: record.url || undefined,
+      };
+      totalLines += 1;
+    } else {
+      // Text file
+      files[record.path] = {
+        type: "content",
+        content: record.content,
+        hash: "",
+        size: record.size,
+        url: undefined,
+      };
+      totalLines += record.content.split("\n").length;
+    }
+
+    // Build tree structure
+    const parts = record.path.split("/").filter(Boolean);
+    let currentTree = tree;
+    let currentTokenTree = tokenTree;
+
+    for (let i = 0; i < parts.length; i++) {
+      const part = parts[i];
+      if (i === parts.length - 1) {
+        // File
+        currentTree[part] = null;
+        currentTokenTree[part] = tokens;
+      } else {
+        // Directory
+        if (!currentTree[part]) {
+          currentTree[part] = {};
+          currentTokenTree[part] = {};
+        }
+        currentTree = currentTree[part] as NestedObject<null>;
+        currentTokenTree = currentTokenTree[part] as TokenTree;
+      }
+    }
+  }
+
+  // Build file string
+  let fileString = "";
+  if (!params.shouldOmitTree) {
+    fileString += "File tree:\n";
+    fileString += treeToString(tokenTree, "");
+    fileString += "\n";
+  }
+
+  if (!params.shouldOmitFiles) {
+    for (const [filePath, content] of Object.entries(files)) {
+      fileString += `${filePath}:\n`;
+      fileString += "-".repeat(80) + "\n";
+      if (content.type === "content" && content.content) {
+        const processed = params.shouldAddLineNumbers
+          ? addLineNumbers(content.content)
+          : content.content;
+        fileString += processed;
+      } else if (content.url) {
+        fileString += content.url;
+      }
+      fileString += "\n\n\n" + "-".repeat(80) + "\n";
+    }
+  }
+
+  return {
+    files,
+    tree,
+    tokenTree,
+    fileString,
+    tokens: totalTokens,
+    totalTokens,
+    totalLines,
+  };
+}
+
+function addLineNumbers(content: string): string {
+  const lines = content.split("\n");
+  const totalLines = lines.length;
+  const totalCharacters = String(totalLines).length;
+  return lines
+    .map((line, index) => {
+      const lineNum = index + 1;
+      const spacesNeeded = totalCharacters - String(lineNum).length;
+      return " ".repeat(spacesNeeded) + String(lineNum) + " | " + line;
+    })
+    .join("\n");
+}
+
+function treeToString(tree: TokenTree, indent: string): string {
+  let result = "";
+  const entries = Object.entries(tree);
+
+  for (let i = 0; i < entries.length; i++) {
+    const [name, value] = entries[i];
+    const isLast = i === entries.length - 1;
+    const prefix = isLast ? "└── " : "├── ";
+    const childIndent = isLast ? "    " : "│   ";
+
+    if (typeof value === "number") {
+      result += `${indent}${prefix}${name} (${value} tokens)\n`;
+    } else {
+      result += `${indent}${prefix}${name}/\n`;
+      result += treeToString(value as TokenTree, indent + childIndent);
+    }
+  }
+
+  return result;
+}
+
 // ==================== MAIN HANDLER ====================
 
 export async function handleRepoEndpoint(
@@ -1396,48 +1535,62 @@ export async function handleRepoEndpoint(
   const params = parseRepoRequestParams(url);
 
   try {
-    const fetchResult = await fetchZipStream(
-      owner,
-      repo,
-      branch,
-      githubAccessToken,
-      repoAccess,
-    );
+    // Use FileDO for caching
+    const ref = branch || repoAccess.default_branch || "HEAD";
+    const doId = env.FILES_DO.idFromName(`v2-${owner}/${repo}/${ref}`);
+    const filesDO = env.FILES_DO.get(doId);
 
-    if ("error" in fetchResult) {
-      return new Response(fetchResult.error, { status: fetchResult.status });
+    // Check if DO is populated
+    const isPopulated = await filesDO.isPopulated();
+
+    if (!isPopulated) {
+      // Fetch ZIP and stream it directly to DO for parsing
+      const fetchResult = await fetchZipStream(
+        owner,
+        repo,
+        branch,
+        githubAccessToken,
+        repoAccess,
+      );
+
+      if ("error" in fetchResult) {
+        return new Response(fetchResult.error, { status: fetchResult.status });
+      }
+
+      // Stream ZIP to DO via fetch - DO will parse and store internally
+      const populateUrl = new URL("http://do/populate");
+      populateUrl.searchParams.set("owner", owner);
+      populateUrl.searchParams.set("repo", repo);
+      populateUrl.searchParams.set("branch", ref);
+
+      const populateResponse = await filesDO.fetch(populateUrl.toString(), {
+        method: "POST",
+        body: fetchResult.stream,
+      });
+
+      if (!populateResponse.ok) {
+        return new Response("Failed to populate file cache", { status: 500 });
+      }
     }
 
-    const options: UithubOptions = {
-      maxTokens: params.maxTokens,
+    // Query DO for files matching current request filters
+    const fileRecords = await filesDO.searchFiles({
       includeExt: params.includeExt,
       excludeExt: params.excludeExt,
       includeDir: params.includeDir,
       excludeDir: params.excludeDir,
-      matchFilenames: params.matchFilenames,
       paths: path ? [path] : undefined,
-      disableGenignore: params.disableGenignore,
-      maxFileSize: params.maxFileSize,
-      yamlFilter: params.yamlFilter,
-      shouldAddLineNumbers: params.shouldAddLineNumbers,
-      shouldOmitFiles: params.shouldOmitFiles,
-      shouldOmitTree: params.shouldOmitTree,
-      // Glob patterns (VS Code style)
+      matchFilenames: params.matchFilenames,
       include: params.include,
       exclude: params.exclude,
-      // Search options
       search: params.search,
       searchMatchCase: params.searchMatchCase,
       searchRegularExp: params.searchRegularExp,
-    };
+      maxTokens: params.maxTokens,
+    });
 
-    const result = await parseGitHubZip(
-      fetchResult.stream,
-      owner,
-      repo,
-      branch,
-      options,
-    );
+    // Convert file records to uithub result format
+    const result = fileRecordsToUithubResult(fileRecords, params);
 
     // Build and return response
     return buildSuccessResponse(

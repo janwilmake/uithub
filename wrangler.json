@@ -11,12 +11,14 @@
   "durable_objects": {
     "bindings": [
       { "name": "ANALYTICS_DO", "class_name": "AnalyticsDO" },
-      { "name": "SOCIALS_DO", "class_name": "SocialsDO" }
+      { "name": "SOCIALS_DO", "class_name": "SocialsDO" },
+      { "name": "FILES_DO", "class_name": "FileDO" }
     ]
   },
   "migrations": [
     { "tag": "v1", "new_sqlite_classes": ["AnalyticsDO"] },
-    { "tag": "v2", "new_sqlite_classes": ["SocialsDO"] }
+    { "tag": "v2", "new_sqlite_classes": ["SocialsDO"] },
+    { "tag": "v3", "new_sqlite_classes": ["FileDO"] }
   ],
   "env": {
     "prod": {
@@ -30,12 +32,14 @@
       "durable_objects": {
         "bindings": [
           { "name": "ANALYTICS_DO", "class_name": "AnalyticsDO" },
-          { "name": "SOCIALS_DO", "class_name": "SocialsDO" }
+          { "name": "SOCIALS_DO", "class_name": "SocialsDO" },
+          { "name": "FILES_DO", "class_name": "FileDO" }
         ]
       },
       "migrations": [
         { "tag": "v1", "new_sqlite_classes": ["AnalyticsDO"] },
-        { "tag": "v2", "new_sqlite_classes": ["SocialsDO"] }
+        { "tag": "v2", "new_sqlite_classes": ["SocialsDO"] },
+        { "tag": "v3", "new_sqlite_classes": ["FileDO"] }
       ]
     }
   }

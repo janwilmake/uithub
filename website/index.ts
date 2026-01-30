@@ -7,8 +7,9 @@ import { handleThreads } from "./threads";
 import { handleThread } from "./thread";
 import { handleAnalytics, logAnalytics, AnalyticsDO } from "./analytics";
 import { handleSocials, SocialsDO } from "./socials";
+import { FileDO } from "./files-do";
 
-export { AnalyticsDO, SocialsDO };
+export { AnalyticsDO, SocialsDO, FileDO };
 
 export default {
   async fetch(

@@ -113,6 +113,7 @@ export interface Env {
   KV: KVNamespace;
   ANALYTICS_DO: DurableObjectNamespace<import("./analytics").AnalyticsDO>;
   SOCIALS_DO: DurableObjectNamespace<import("./socials").SocialsDO>;
+  FILES_DO: DurableObjectNamespace<import("./files-do").FileDO>;
 }
 
 export interface UserAccount {
