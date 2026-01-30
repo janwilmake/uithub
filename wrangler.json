@@ -16,7 +16,9 @@
   },
   "migrations": [
     { "tag": "v1", "new_sqlite_classes": ["AnalyticsDO"] },
-    { "tag": "v2", "new_sqlite_classes": ["SocialsDO"] }
+    { "tag": "v2", "new_sqlite_classes": ["SocialsDO"] },
+    { "tag": "v3", "new_sqlite_classes": ["FileDO"] },
+    { "tag": "v4", "deleted_classes": ["FileDO"] }
   ],
   "env": {
     "prod": {
@@ -35,7 +37,9 @@
       },
       "migrations": [
         { "tag": "v1", "new_sqlite_classes": ["AnalyticsDO"] },
-        { "tag": "v2", "new_sqlite_classes": ["SocialsDO"] }
+        { "tag": "v2", "new_sqlite_classes": ["SocialsDO"] },
+        { "tag": "v3", "new_sqlite_classes": ["FileDO"] },
+        { "tag": "v4", "deleted_classes": ["FileDO"] }
       ]
     }
   }
