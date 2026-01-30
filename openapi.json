@@ -15,7 +15,7 @@
       "get": {
         "operationId": "getRepositoryContents",
         "summary": "Get repository contents",
-        "description": "Fetch contents of a GitHub repository, with various filtering options. \n\nExample usage:\n- Max 10.000 LLM tokens in response: https://uithub.com/codefromanywhere/openapi-search?maxTokens=10000\n- Only markdown: https://uithub.com/codefromanywhere/openapi-search?ext=md\n- Only JS/TS: https://uithub.com/codefromanywhere/openapi-search?ext=js,jsx,ts,tsx\n- Respond in YAML: https://uithub.com/codefromanywhere/openapi-search?accept=text/yaml\n- Max 10kb per file: https://uithub.com/codefromanywhere/openapi-search?maxFileSize=10000\n\nKnown limitations: \n\n- Doesn't work well with large repos over 50mb\n- For now the API is free to use for fair use, but a ratelimit will be added in the future.\n- There is an hourly cap for githubs ratelimit, you can get up to 5000 requests per hour by using your own apiKey.\n\nRead below for more the entire spec, or try it out in the widget and get some code.\n\nReach out [here](https://news.ycombinator.com/item?id=41797578) for feedback or feature requests.",
+        "description": "Fetch contents of a GitHub repository, with various filtering options. \n\nExample usage:\n- Max 10.000 LLM tokens in response: https://uithub.com/codefromanywhere/openapi-search?maxTokens=10000\n- Only markdown: https://uithub.com/codefromanywhere/openapi-search?ext=md\n- Only JS/TS: https://uithub.com/codefromanywhere/openapi-search?ext=js,jsx,ts,tsx\n- Respond in YAML: https://uithub.com/codefromanywhere/openapi-search?accept=text/yaml \n- Max 10kb per file: https://uithub.com/codefromanywhere/openapi-search?maxFileSize=10000 \n- Glob include pattern: https://uithub.com/codefromanywhere/openapi-search?include=**/*.ts,src/** \n- Glob exclude pattern: https://uithub.com/codefromanywhere/openapi-search?exclude=**/node_modules/**,**/*.test.ts\n- Search file contents: https://uithub.com/codefromanywhere/openapi-search?search=function%20parse\n- Case-sensitive search: https://uithub.com/codefromanywhere/openapi-search?search=API&searchMatchCase=true\n- Regex search: https://uithub.com/codefromanywhere/openapi-search?search=export%20(const|function)&searchRegularExp=true\n\nKnown limitations: \n\n- Doesn't work well with large repos over 50mb\n- For now the API is free to use for fair use, but a ratelimit will be added in the future.\n- There is an hourly cap for githubs ratelimit, you can get up to 5000 requests per hour by using your own apiKey.\n\nRead below for more the entire spec, or try it out in the widget and get some code.\n\nReach out [here](https://news.ycombinator.com/item?id=41797578) for feedback or feature requests.",
         "parameters": [
           { "$ref": "#/components/parameters/owner" },
           { "$ref": "#/components/parameters/repo" },
@@ -34,7 +34,12 @@
           { "$ref": "#/components/parameters/maxTokens" },
           { "$ref": "#/components/parameters/yamlString" },
           { "$ref": "#/components/parameters/omitFiles" },
-          { "$ref": "#/components/parameters/omitTree" }
+          { "$ref": "#/components/parameters/omitTree" },
+          { "$ref": "#/components/parameters/include" },
+          { "$ref": "#/components/parameters/exclude" },
+          { "$ref": "#/components/parameters/search" },
+          { "$ref": "#/components/parameters/searchMatchCase" },
+          { "$ref": "#/components/parameters/searchRegularExp" }
         ],
         "responses": {
           "200": {
@@ -72,7 +77,7 @@
       "get": {
         "operationId": "getRelevantContents",
         "summary": "Get contents relevant for an issue or discussion",
-        "description": "Fetch contents of a GitHub repository, with various filtering options. \n\nExample usage:\n- Max 10.000 LLM tokens in response: https://uithub.com/codefromanywhere/openapi-search?maxTokens=10000\n- Only markdown: https://uithub.com/codefromanywhere/openapi-search?ext=md\n- Only JS/TS: https://uithub.com/codefromanywhere/openapi-search?ext=js,jsx,ts,tsx\n- Respond in YAML: https://uithub.com/codefromanywhere/openapi-search?accept=text/yaml\n- Max 10kb per file: https://uithub.com/codefromanywhere/openapi-search?maxFileSize=10000\n\nKnown limitations: \n\n- Doesn't work well with large repos over 50mb\n- For now the API is free to use for fair use, but a ratelimit will be added in the future.\n- There is an hourly cap for githubs ratelimit, you can get up to 5000 requests per hour by using your own apiKey.\n\nRead below for more the entire spec, or try it out in the widget and get some code.\n\nReach out [here](https://news.ycombinator.com/item?id=41797578) for feedback or feature requests.",
+        "description": "Fetch contents of a GitHub repository relevant for an issue or discussion, with various filtering options. \n\nExample usage:\n- Max 10.000 LLM tokens in response: https://uithub.com/codefromanywhere/openapi-search/issues/1?maxTokens=10000\n- Glob include pattern: https://uithub.com/owner/repo/issues/1?include=**/*.ts\n- Search file contents: https://uithub.com/owner/repo/issues/1?search=function%20parse\n\nKnown limitations: \n\n- Doesn't work well with large repos over 50mb\n- For now the API is free to use for fair use, but a ratelimit will be added in the future.\n- There is an hourly cap for githubs ratelimit, you can get up to 5000 requests per hour by using your own apiKey.\n\nRead below for more the entire spec, or try it out in the widget and get some code.\n\nReach out [here](https://news.ycombinator.com/item?id=41797578) for feedback or feature requests.",
         "parameters": [
           { "$ref": "#/components/parameters/owner" },
           { "$ref": "#/components/parameters/repo" },
@@ -91,7 +96,12 @@
           { "$ref": "#/components/parameters/maxTokens" },
           { "$ref": "#/components/parameters/yamlString" },
           { "$ref": "#/components/parameters/omitFiles" },
-          { "$ref": "#/components/parameters/omitTree" }
+          { "$ref": "#/components/parameters/omitTree" },
+          { "$ref": "#/components/parameters/include" },
+          { "$ref": "#/components/parameters/exclude" },
+          { "$ref": "#/components/parameters/search" },
+          { "$ref": "#/components/parameters/searchMatchCase" },
+          { "$ref": "#/components/parameters/searchRegularExp" }
         ],
         "responses": {
           "200": {
@@ -552,6 +562,53 @@
             "text/html"
           ]
         }
+      },
+      "include": {
+        "name": "include",
+        "in": "query",
+        "required": false,
+        "schema": {
+          "type": "string"
+        },
+        "description": "Comma-separated glob patterns for files to include (e.g., '**/*.ts,src/**'). Supports VS Code style patterns: * (single segment), ** (multiple segments), ? (single char), [abc] (char class), {a,b} (alternatives)"
+      },
+      "exclude": {
+        "name": "exclude",
+        "in": "query",
+        "required": false,
+        "schema": {
+          "type": "string"
+        },
+        "description": "Comma-separated glob patterns for files to exclude (e.g., '**/node_modules/**,**/*.test.ts'). Supports VS Code style patterns: * (single segment), ** (multiple segments), ? (single char), [abc] (char class), {a,b} (alternatives)"
+      },
+      "search": {
+        "name": "search",
+        "in": "query",
+        "required": false,
+        "schema": {
+          "type": "string"
+        },
+        "description": "Search string to filter files by content. Only files containing this text will be included in results."
+      },
+      "searchMatchCase": {
+        "name": "searchMatchCase",
+        "in": "query",
+        "required": false,
+        "schema": {
+          "type": "boolean",
+          "default": false
+        },
+        "description": "Whether search should be case-sensitive. Defaults to false (case-insensitive)."
+      },
+      "searchRegularExp": {
+        "name": "searchRegularExp",
+        "in": "query",
+        "required": false,
+        "schema": {
+          "type": "boolean",
+          "default": false
+        },
+        "description": "Whether the search string should be treated as a regular expression. Defaults to false (literal string search)."
       }
     }
   }

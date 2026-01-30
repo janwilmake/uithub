@@ -716,6 +716,11 @@ export async function parseZipStreaming(
       totalTokens += tokens;
       totalLines += lines;
     } else {
+      // Skip binary files when a search query is active (can't search binary content)
+      if (search) {
+        continue;
+      }
+
       const tokens = Math.ceil(
         (
           `/${filePath}:\n` +

@@ -46,6 +46,13 @@ interface RepoRequestParams {
   shouldOmitFiles: boolean;
   shouldOmitTree: boolean;
   matchFilenames?: string[];
+  // Glob patterns (VS Code style)
+  include?: string[];
+  exclude?: string[];
+  // Search options
+  search?: string;
+  searchMatchCase?: boolean;
+  searchRegularExp?: boolean;
 }
 
 interface ModalContext {
@@ -166,6 +173,21 @@ function parseRepoRequestParams(url: URL): RepoRequestParams {
       ?.split(",")
       .map((x) => x.trim())
       .filter(Boolean),
+    // Glob patterns (VS Code style)
+    include: url.searchParams
+      .get("include")
+      ?.split(",")
+      .map((x) => x.trim())
+      .filter(Boolean),
+    exclude: url.searchParams
+      .get("exclude")
+      ?.split(",")
+      .map((x) => x.trim())
+      .filter(Boolean),
+    // Search options
+    search: url.searchParams.get("search") || undefined,
+    searchMatchCase: url.searchParams.get("searchMatchCase") === "true",
+    searchRegularExp: url.searchParams.get("searchRegularExp") === "true",
   };
 }
 
@@ -555,17 +577,19 @@ function generateViewHTML(context: {
     header {
       background-color: var(--header-bg);
       border-bottom: 1px solid var(--header-border);
-      padding: 10px;
-      display: flex;
-      flex-wrap: wrap;
-      justify-content: space-between;
-      align-items: center;
       position: fixed;
       top: 0;
       left: 0;
       right: 0;
       z-index: 1000;
       ${contentBlurStyle}
+    }
+    .header-main {
+      display: flex;
+      flex-wrap: wrap;
+      justify-content: space-between;
+      align-items: center;
+      padding: 10px;
     }
     button, select, input {
       background-color: var(--button-bg);
@@ -675,12 +699,109 @@ function generateViewHTML(context: {
       align-items: center;
       justify-content: center;
     }
+    /* Advanced options toggle button */
+    .toggle-advanced {
+      background: var(--button-bg);
+      border: 1px solid var(--button-border);
+      border-radius: 4px;
+      padding: 4px 8px;
+      font-size: 14px;
+      font-weight: 600;
+      cursor: pointer;
+      color: var(--text-color);
+      min-width: 28px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+    .toggle-advanced:hover {
+      background: rgba(139, 92, 246, 0.2);
+    }
+    .toggle-advanced.active {
+      background: rgba(139, 92, 246, 0.3);
+      border-color: rgba(139, 92, 246, 0.5);
+    }
+    /* Advanced options panel (VS Code style) */
+    .advanced-options {
+      display: none;
+      flex-direction: column;
+      gap: 4px;
+      padding: 8px 10px;
+      background: var(--header-bg);
+      border-bottom: 1px solid var(--header-border);
+    }
+    .advanced-options.visible {
+      display: flex;
+    }
+    .advanced-row {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+    .advanced-label {
+      font-size: 12px;
+      color: var(--text-color);
+      opacity: 0.7;
+      min-width: 70px;
+      text-align: right;
+    }
+    .advanced-input {
+      flex: 1;
+      background: var(--button-bg);
+      border: 1px solid var(--button-border);
+      border-radius: 4px;
+      padding: 4px 8px;
+      font-size: 13px;
+      color: var(--text-color);
+      font-family: monospace;
+    }
+    .advanced-input:focus {
+      outline: none;
+      border-color: rgba(139, 92, 246, 0.5);
+    }
+    .advanced-input::placeholder {
+      opacity: 0.5;
+    }
+    /* Search row with options */
+    .search-row {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+    .search-options {
+      display: flex;
+      gap: 2px;
+    }
+    .search-option-btn {
+      background: var(--button-bg);
+      border: 1px solid var(--button-border);
+      border-radius: 4px;
+      padding: 4px 8px;
+      font-size: 11px;
+      cursor: pointer;
+      color: var(--text-color);
+      opacity: 0.6;
+      font-weight: 500;
+    }
+    .search-option-btn:hover {
+      opacity: 0.8;
+    }
+    .search-option-btn.active {
+      background: rgba(139, 92, 246, 0.3);
+      border-color: rgba(139, 92, 246, 0.5);
+      opacity: 1;
+    }
+    .search-option-btn abbr {
+      text-decoration: none;
+    }
   </style>
 </head>
 <body>
   ${generateModalHTML(modalState, modalContext)}
   <header>
+    <div class="header-main">
     <div id="filterContainer">
+      <button class="toggle-advanced" id="toggleAdvanced" title="Toggle search details">...</button>
       <select id="formatSelect" onchange="updateFilters()">
         <option value="">Format: HTML</option>
         <option value="application/json">Format: JSON</option>
@@ -742,6 +863,29 @@ function generateViewHTML(context: {
         </svg>
       </a>
     </div>
+    </div>
+    <div class="advanced-options" id="advancedOptions">
+      <div class="advanced-row">
+        <span class="advanced-label">files to include</span>
+        <input type="text" id="includeInput" class="advanced-input" placeholder="e.g. src/**/*.ts, **/*.tsx" onchange="updateFilters()">
+      </div>
+      <div class="advanced-row">
+        <span class="advanced-label">files to exclude</span>
+        <input type="text" id="excludeInput" class="advanced-input" placeholder="e.g. **/*.test.ts, **/node_modules/**" onchange="updateFilters()">
+      </div>
+      <div class="advanced-row search-row">
+        <span class="advanced-label">search</span>
+        <input type="text" id="searchInput" class="advanced-input" placeholder="Search in file contents" onchange="updateFilters()">
+        <div class="search-options">
+          <button class="search-option-btn" id="matchCaseBtn" onclick="toggleSearchOption('matchCase')" title="Match Case">
+            <abbr>Aa</abbr>
+          </button>
+          <button class="search-option-btn" id="regexBtn" onclick="toggleSearchOption('regex')" title="Use Regular Expression">
+            <abbr>.*</abbr>
+          </button>
+        </div>
+      </div>
+    </div>
   </header>
   <div class="content-container" style="max-width: 100vw; margin-top:35px;">
     <pre id="textToCopy">${escapeHTML(fileString)}</pre>
@@ -770,10 +914,44 @@ function generateViewHTML(context: {
       setTimeout(() => { buttonText.textContent = originalText; }, 1000);
     });
 
+    // Search option state
+    let searchMatchCase = false;
+    let searchRegularExp = false;
+
+    function toggleSearchOption(option) {
+      if (option === 'matchCase') {
+        searchMatchCase = !searchMatchCase;
+        document.getElementById('matchCaseBtn').classList.toggle('active', searchMatchCase);
+      } else if (option === 'regex') {
+        searchRegularExp = !searchRegularExp;
+        document.getElementById('regexBtn').classList.toggle('active', searchRegularExp);
+      }
+    }
+
+    function toggleAdvancedOptions() {
+      const panel = document.getElementById('advancedOptions');
+      const btn = document.getElementById('toggleAdvanced');
+      const isVisible = panel.classList.toggle('visible');
+      btn.classList.toggle('active', isVisible);
+      localStorage.setItem('uithub-advanced-visible', isVisible ? 'true' : 'false');
+      // Adjust body padding based on actual header height
+      updateBodyPadding();
+    }
+
+    function updateBodyPadding() {
+      const header = document.querySelector('header');
+      if (header) {
+        document.body.style.paddingTop = header.offsetHeight + 'px';
+      }
+    }
+
     function updateFilters() {
       const format = document.getElementById('formatSelect').value;
       const maxTokens = document.getElementById('maxTokensInput').value;
       const ext = document.getElementById('extSelect').value;
+      const includeVal = document.getElementById('includeInput').value.trim();
+      const excludeVal = document.getElementById('excludeInput').value.trim();
+      const searchVal = document.getElementById('searchInput').value.trim();
       let url = new URL(window.location.href);
 
       if (format) {
@@ -793,6 +971,38 @@ function generateViewHTML(context: {
         url.searchParams.set('ext', ext);
       } else {
         url.searchParams.delete('ext');
+      }
+
+      // Glob patterns
+      if (includeVal) {
+        url.searchParams.set('include', includeVal);
+      } else {
+        url.searchParams.delete('include');
+      }
+
+      if (excludeVal) {
+        url.searchParams.set('exclude', excludeVal);
+      } else {
+        url.searchParams.delete('exclude');
+      }
+
+      // Search
+      if (searchVal) {
+        url.searchParams.set('search', searchVal);
+        if (searchMatchCase) {
+          url.searchParams.set('searchMatchCase', 'true');
+        } else {
+          url.searchParams.delete('searchMatchCase');
+        }
+        if (searchRegularExp) {
+          url.searchParams.set('searchRegularExp', 'true');
+        } else {
+          url.searchParams.delete('searchRegularExp');
+        }
+      } else {
+        url.searchParams.delete('search');
+        url.searchParams.delete('searchMatchCase');
+        url.searchParams.delete('searchRegularExp');
       }
 
       window.location.href = url.toString();
@@ -862,12 +1072,40 @@ function generateViewHTML(context: {
       const [_, owner, repo, page, branch, ...pathParts] = url.pathname.split("/");
       const path = pathParts.join("/");
       document.getElementById('locationSelect').value = path;
+
+      // Initialize advanced options from URL
+      document.getElementById('includeInput').value = url.searchParams.get('include') || '';
+      document.getElementById('excludeInput').value = url.searchParams.get('exclude') || '';
+      document.getElementById('searchInput').value = url.searchParams.get('search') || '';
+
+      // Search options
+      searchMatchCase = url.searchParams.get('searchMatchCase') === 'true';
+      searchRegularExp = url.searchParams.get('searchRegularExp') === 'true';
+      document.getElementById('matchCaseBtn').classList.toggle('active', searchMatchCase);
+      document.getElementById('regexBtn').classList.toggle('active', searchRegularExp);
+
+      // Initialize advanced panel visibility from localStorage
+      const advancedVisible = localStorage.getItem('uithub-advanced-visible') === 'true';
+      const panel = document.getElementById('advancedOptions');
+      const btn = document.getElementById('toggleAdvanced');
+      if (advancedVisible) {
+        panel.classList.add('visible');
+        btn.classList.add('active');
+      }
+      // Use setTimeout to ensure DOM has rendered before measuring
+      setTimeout(updateBodyPadding, 0);
     }
 
     window.onload = function () {
       populateExtensions(tree);
       populateLocations(tree);
       initializeFromURL();
+
+      // Set up toggle button click handler
+      document.getElementById('toggleAdvanced').addEventListener('click', toggleAdvancedOptions);
+
+      // Update padding on resize
+      window.addEventListener('resize', updateBodyPadding);
     };
   </script>
   <!-- 100% privacy-first analytics -->
@@ -1184,6 +1422,13 @@ export async function handleRepoEndpoint(
       shouldAddLineNumbers: params.shouldAddLineNumbers,
       shouldOmitFiles: params.shouldOmitFiles,
       shouldOmitTree: params.shouldOmitTree,
+      // Glob patterns (VS Code style)
+      include: params.include,
+      exclude: params.exclude,
+      // Search options
+      search: params.search,
+      searchMatchCase: params.searchMatchCase,
+      searchRegularExp: params.searchRegularExp,
     };
 
     const result = await parseGitHubZip(
