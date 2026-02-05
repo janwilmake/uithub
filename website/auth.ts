@@ -218,6 +218,33 @@ export async function createOrUpdateUser(
   return newAccount;
 }
 
+// ==================== CORS HELPERS ====================
+
+const corsHeaders = {
+  "Access-Control-Allow-Origin": "*",
+  "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
+  "Access-Control-Allow-Headers": "Content-Type, Authorization",
+};
+
+function withCors(response: Response): Response {
+  const newHeaders = new Headers(response.headers);
+  for (const [key, value] of Object.entries(corsHeaders)) {
+    newHeaders.set(key, value);
+  }
+  return new Response(response.body, {
+    status: response.status,
+    statusText: response.statusText,
+    headers: newHeaders,
+  });
+}
+
+function handleCorsPreflightRequest(): Response {
+  return new Response(null, {
+    status: 204,
+    headers: corsHeaders,
+  });
+}
+
 // ==================== CRYPTO HELPERS ====================
 
 function generateRandomString(length: number = 32): string {
@@ -307,14 +334,14 @@ export function getBearerToken(request: Request): string | null {
 // ==================== OAUTH WELL-KNOWN ENDPOINTS ====================
 
 function handleOAuthProtectedResource(url: URL): Response {
-  return Response.json({
+  return withCors(Response.json({
     resource: url.origin,
     authorization_servers: [url.origin],
-  });
+  }));
 }
 
 function handleOAuthAuthorizationServer(url: URL): Response {
-  return Response.json({
+  return withCors(Response.json({
     issuer: url.origin,
     authorization_endpoint: `${url.origin}/authorize`,
     token_endpoint: `${url.origin}/token`,
@@ -327,7 +354,7 @@ function handleOAuthAuthorizationServer(url: URL): Response {
       "client_secret_post",
       "client_secret_basic",
     ],
-  });
+  }));
 }
 
 // ==================== DYNAMIC CLIENT REGISTRATION ====================
@@ -337,14 +364,14 @@ async function handleClientRegistration(
   env: Env,
 ): Promise<Response> {
   if (request.method !== "POST") {
-    return new Response("Method not allowed", { status: 405 });
+    return withCors(new Response("Method not allowed", { status: 405 }));
   }
 
   let body: any;
   try {
     body = await request.json();
   } catch {
-    return Response.json({ error: "invalid_request" }, { status: 400 });
+    return withCors(Response.json({ error: "invalid_request" }, { status: 400 }));
   }
 
   const { redirect_uris, client_name } = body;
@@ -354,10 +381,10 @@ async function handleClientRegistration(
     !Array.isArray(redirect_uris) ||
     redirect_uris.length === 0
   ) {
-    return Response.json(
+    return withCors(Response.json(
       { error: "invalid_request", error_description: "redirect_uris required" },
       { status: 400 },
-    );
+    ));
   }
 
   const clientId = `client_${generateRandomString(16)}`;
@@ -373,13 +400,13 @@ async function handleClientRegistration(
 
   await setRegisteredClient(client, env);
 
-  return Response.json({
+  return withCors(Response.json({
     client_id: clientId,
     client_secret: clientSecret,
     redirect_uris,
     client_name: client.client_name,
     token_endpoint_auth_method: "client_secret_post",
-  });
+  }));
 }
 
 // ==================== OAUTH AUTHORIZATION ENDPOINT ====================
@@ -474,7 +501,7 @@ async function handleAuthorize(request: Request, env: Env): Promise<Response> {
 
 async function handleToken(request: Request, env: Env): Promise<Response> {
   if (request.method !== "POST") {
-    return new Response("Method not allowed", { status: 405 });
+    return withCors(new Response("Method not allowed", { status: 405 }));
   }
 
   const contentType = request.headers.get("Content-Type") || "";
@@ -489,19 +516,19 @@ async function handleToken(request: Request, env: Env): Promise<Response> {
   } else if (contentType.includes("application/json")) {
     body = await request.json();
   } else {
-    return Response.json(
+    return withCors(Response.json(
       {
         error: "invalid_request",
         error_description: "Unsupported content type",
       },
       { status: 400 },
-    );
+    ));
   }
 
   const grantType = body.grant_type;
 
   if (grantType !== "authorization_code") {
-    return Response.json({ error: "unsupported_grant_type" }, { status: 400 });
+    return withCors(Response.json({ error: "unsupported_grant_type" }, { status: 400 }));
   }
 
   const code = body.code;
@@ -511,60 +538,60 @@ async function handleToken(request: Request, env: Env): Promise<Response> {
   const codeVerifier = body.code_verifier;
 
   if (!code || !redirectUri || !clientId) {
-    return Response.json(
+    return withCors(Response.json(
       {
         error: "invalid_request",
         error_description: "Missing required parameters",
       },
       { status: 400 },
-    );
+    ));
   }
 
   const client = await getRegisteredClient(clientId, env);
   if (!client) {
-    return Response.json({ error: "invalid_client" }, { status: 401 });
+    return withCors(Response.json({ error: "invalid_client" }, { status: 401 }));
   }
 
   if (clientSecret && client.client_secret !== clientSecret) {
-    return Response.json({ error: "invalid_client" }, { status: 401 });
+    return withCors(Response.json({ error: "invalid_client" }, { status: 401 }));
   }
 
   const authCode = await getAuthorizationCode(code, env);
   if (!authCode) {
-    return Response.json(
+    return withCors(Response.json(
       { error: "invalid_grant", error_description: "Invalid or expired code" },
       { status: 400 },
-    );
+    ));
   }
 
   if (authCode.client_id !== clientId) {
-    return Response.json(
+    return withCors(Response.json(
       { error: "invalid_grant", error_description: "Client mismatch" },
       { status: 400 },
-    );
+    ));
   }
 
   if (authCode.redirect_uri !== redirectUri) {
-    return Response.json(
+    return withCors(Response.json(
       { error: "invalid_grant", error_description: "Redirect URI mismatch" },
       { status: 400 },
-    );
+    ));
   }
 
   if (Date.now() > authCode.expires_at) {
     await deleteAuthorizationCode(code, env);
-    return Response.json(
+    return withCors(Response.json(
       { error: "invalid_grant", error_description: "Code expired" },
       { status: 400 },
-    );
+    ));
   }
 
   if (authCode.code_challenge) {
     if (!codeVerifier) {
-      return Response.json(
+      return withCors(Response.json(
         { error: "invalid_grant", error_description: "code_verifier required" },
         { status: 400 },
-      );
+      ));
     }
     const valid = await verifyCodeChallenge(
       codeVerifier,
@@ -572,10 +599,10 @@ async function handleToken(request: Request, env: Env): Promise<Response> {
       authCode.code_challenge_method || "plain",
     );
     if (!valid) {
-      return Response.json(
+      return withCors(Response.json(
         { error: "invalid_grant", error_description: "Invalid code_verifier" },
         { status: 400 },
-      );
+      ));
     }
   }
 
@@ -618,12 +645,12 @@ async function handleToken(request: Request, env: Env): Promise<Response> {
 
   await env.KV.put(clientAccessKey, JSON.stringify(existingAccess));
 
-  return Response.json({
+  return withCors(Response.json({
     access_token: accessToken,
     token_type: "Bearer",
     expires_in: 86400,
     scope: authCode.scopes,
-  });
+  }));
 }
 
 // ==================== BROWSER LOGIN FLOW ====================
@@ -868,6 +895,19 @@ export async function authMiddleware(
 ): Promise<Response | null> {
   const url = new URL(request.url);
 
+  // Handle CORS preflight for OAuth endpoints
+  if (request.method === "OPTIONS") {
+    if (
+      url.pathname === "/register" ||
+      url.pathname === "/token" ||
+      url.pathname === "/.well-known/oauth-protected-resource" ||
+      url.pathname === "/.well-known/oauth-authorization-server" ||
+      url.pathname === "/.well-known/openid-configuration"
+    ) {
+      return handleCorsPreflightRequest();
+    }
+  }
+
   // Well-known endpoints
   if (url.pathname === "/.well-known/oauth-protected-resource") {
     return handleOAuthProtectedResource(url);
@@ -881,7 +921,7 @@ export async function authMiddleware(
   }
 
   // OAuth endpoints
-  if (url.pathname === "/register" && request.method === "POST") {
+  if (url.pathname === "/register") {
     return handleClientRegistration(request, env);
   }
 
@@ -889,7 +929,7 @@ export async function authMiddleware(
     return handleAuthorize(request, env);
   }
 
-  if (url.pathname === "/token" && request.method === "POST") {
+  if (url.pathname === "/token") {
     return handleToken(request, env);
   }
 
