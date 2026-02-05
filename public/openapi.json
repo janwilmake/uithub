@@ -58,20 +58,60 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "https://ref.actionschema.com/file-object.json"
+                  "$ref": "#/components/schemas/RepositoryResponse"
                 }
               },
               "text/yaml": {
                 "schema": {
-                  "$ref": "https://ref.actionschema.com/file-object.json"
+                  "$ref": "#/components/schemas/RepositoryResponse"
                 }
               },
               "text/markdown": { "schema": { "type": "string" } },
               "text/html": { "schema": { "type": "string" } }
             }
           },
+          "401": {
+            "description": "Unauthorized - authentication required",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "402": {
+            "description": "Payment required - insufficient credit for private repository access",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden - private repository access requires 'repo' scope",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
           "404": {
             "description": "Repository or file not found",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error",
             "content": {
               "text/plain": {
                 "schema": {
@@ -121,20 +161,60 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "https://ref.actionschema.com/file-object.json"
+                  "$ref": "#/components/schemas/RepositoryResponse"
                 }
               },
               "text/yaml": {
                 "schema": {
-                  "$ref": "https://ref.actionschema.com/file-object.json"
+                  "$ref": "#/components/schemas/RepositoryResponse"
                 }
               },
               "text/markdown": { "schema": { "type": "string" } },
               "text/html": { "schema": { "type": "string" } }
             }
           },
+          "401": {
+            "description": "Unauthorized - authentication required",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "402": {
+            "description": "Payment required - insufficient credit for private repository access",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden - private repository access requires 'repo' scope",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
           "404": {
             "description": "Repository or file not found",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error",
             "content": {
               "text/plain": {
                 "schema": {
@@ -790,6 +870,88 @@
             "description": "Human-readable error description"
           }
         }
+      },
+      "RepositoryResponse": {
+        "type": "object",
+        "description": "Repository contents response",
+        "properties": {
+          "size": {
+            "$ref": "#/components/schemas/SizeInfo"
+          },
+          "tree": {
+            "$ref": "#/components/schemas/TokenTree",
+            "description": "Token tree showing file/folder structure with token counts. Omitted if omitTree=true"
+          },
+          "files": {
+            "type": "object",
+            "additionalProperties": {
+              "$ref": "#/components/schemas/FileContent"
+            },
+            "description": "Map of file paths to their contents. Omitted if omitFiles=true"
+          }
+        },
+        "required": ["size"]
+      },
+      "SizeInfo": {
+        "type": "object",
+        "description": "Size information about the repository contents",
+        "properties": {
+          "tokens": {
+            "type": "integer",
+            "description": "Number of tokens in the returned (filtered) content"
+          },
+          "totalTokens": {
+            "type": "integer",
+            "description": "Total number of tokens in the repository before filtering"
+          },
+          "characters": {
+            "type": "integer",
+            "description": "Number of characters in the content (totalTokens * 5)"
+          },
+          "lines": {
+            "type": "integer",
+            "description": "Total number of lines in the repository"
+          }
+        },
+        "required": ["tokens", "totalTokens", "characters", "lines"]
+      },
+      "TokenTree": {
+        "type": "object",
+        "description": "Recursive tree structure where keys are file/folder names. Values are either numbers (token count for files) or nested TokenTree objects (for folders)",
+        "additionalProperties": {
+          "oneOf": [
+            { "type": "integer", "description": "Token count for a file (rounded to nearest 100)" },
+            { "$ref": "#/components/schemas/TokenTree" }
+          ]
+        }
+      },
+      "FileContent": {
+        "type": "object",
+        "description": "Content information for a single file",
+        "properties": {
+          "type": {
+            "type": "string",
+            "enum": ["content", "binary"],
+            "description": "Type of file - 'content' for text files, 'binary' for binary files"
+          },
+          "content": {
+            "type": "string",
+            "description": "File content (only present for type='content')"
+          },
+          "url": {
+            "type": "string",
+            "description": "URL to the file (only present for type='binary')"
+          },
+          "hash": {
+            "type": "string",
+            "description": "SHA hash of the file content"
+          },
+          "size": {
+            "type": "integer",
+            "description": "Size of the file in bytes"
+          }
+        },
+        "required": ["type", "hash", "size"]
       }
     },
     "parameters": {
