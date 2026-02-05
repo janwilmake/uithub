@@ -180,12 +180,12 @@ export function formatRepoContent(
   files: { [path: string]: ContentType },
   options: FormatOptions,
 ): FormattedOutput {
-  const { shouldAddLineNumbers, shouldOmitFiles } = options;
+  const { shouldAddLineNumbers, shouldOmitFiles, shouldOmitTree } = options;
 
   const tree = filePathToNestedObject({ ...files }, () => null);
   const rawTokenTree = filePathToTokenTree(files, shouldAddLineNumbers);
   const tokenTree = processTokenTree(rawTokenTree);
-  const treeString = tokenTreeToString(tokenTree);
+  const treeString = shouldOmitTree ? "" : tokenTreeToString(tokenTree);
   const treeTokens = Math.round(treeString.length / CHARACTERS_PER_TOKEN);
 
   const filePart = shouldOmitFiles
@@ -196,10 +196,19 @@ export function formatRepoContent(
         )
         .join("");
 
-  const fileString = treeString + (shouldOmitFiles ? "" : "\n\n" + filePart);
-  const tokens = Math.round(
-    (treeString + "\n\n" + filePart).length / CHARACTERS_PER_TOKEN,
-  );
+  // Build fileString based on what's included
+  let fileString: string;
+  if (shouldOmitTree && shouldOmitFiles) {
+    fileString = "";
+  } else if (shouldOmitTree) {
+    fileString = filePart;
+  } else if (shouldOmitFiles) {
+    fileString = treeString;
+  } else {
+    fileString = treeString + "\n\n" + filePart;
+  }
+
+  const tokens = Math.round(fileString.length / CHARACTERS_PER_TOKEN);
 
   return { tree, tokenTree, fileString, tokens, treeTokens };
 }

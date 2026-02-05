@@ -60,7 +60,6 @@ interface UithubOptions {
   excludeExt?: string[];       // Exclude files with these extensions
   includeDir?: string[];       // Only include files in these directories
   excludeDir?: string[];       // Exclude files in these directories
-  matchFilenames?: string[];   // Only include files matching these names
   paths?: string[];            // Only include files under these paths
   maxFileSize?: number;        // Skip files larger than this (bytes)
 
@@ -139,16 +138,6 @@ await parseGitHubZip(stream, owner, repo, branch, {
 await parseGitHubZip(stream, owner, repo, branch, {
   maxTokens: 50000,
   paths: ["src/components", "src/utils"]
-});
-```
-
-### By Filename
-
-```typescript
-// Only specific filenames
-await parseGitHubZip(stream, owner, repo, branch, {
-  maxTokens: 50000,
-  matchFilenames: ["package.json", "tsconfig.json"]
 });
 ```
 

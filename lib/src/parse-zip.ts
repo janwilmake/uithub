@@ -311,7 +311,6 @@ function shouldIncludeFile(context: {
   includeDir?: string[];
   excludeDir?: string[];
   paths?: string[];
-  matchFilenames?: string[];
 }): boolean {
   const {
     excludeDir,
@@ -321,17 +320,9 @@ function shouldIncludeFile(context: {
     includeExt,
     paths,
     yamlParse,
-    matchFilenames,
   } = context;
   const ext = filePath.split(".").pop()!;
-  const lowercaseFilename = filePath.split("/").pop()!.toLowerCase();
 
-  if (
-    matchFilenames &&
-    !matchFilenames.find((name) => name.toLowerCase() === lowercaseFilename)
-  ) {
-    return false;
-  }
   if (includeExt && !includeExt.includes(ext)) return false;
   if (excludeExt && excludeExt.includes(ext)) return false;
 
@@ -681,7 +672,6 @@ export async function parseZipStreaming(
     disableGenignore,
     maxFileSize,
     yamlFilter,
-    matchFilenames,
     maxTokens,
     shouldAddLineNumbers = true,
     include,
@@ -750,7 +740,6 @@ export async function parseZipStreaming(
       // Early filter: path-based checks (no decompression needed)
       if (
         !shouldIncludeFile({
-          matchFilenames,
           filePath,
           yamlParse,
           includeExt,

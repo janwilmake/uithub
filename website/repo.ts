@@ -45,7 +45,6 @@ interface RepoRequestParams {
   yamlFilter?: string;
   shouldOmitFiles: boolean;
   shouldOmitTree: boolean;
-  matchFilenames?: string[];
   // Glob patterns (VS Code style)
   include?: string[];
   exclude?: string[];
@@ -168,11 +167,6 @@ function parseRepoRequestParams(url: URL): RepoRequestParams {
     yamlFilter: url.searchParams.get("yamlFilter") || undefined,
     shouldOmitFiles: url.searchParams.get("omitFiles") === "true",
     shouldOmitTree: url.searchParams.get("omitTree") === "true",
-    matchFilenames: url.searchParams
-      .get("matchFilenames")
-      ?.split(",")
-      .map((x) => x.trim())
-      .filter(Boolean),
     // Glob patterns (VS Code style)
     include: url.searchParams
       .get("include")
@@ -594,6 +588,7 @@ function generateViewHTML(context: {
     button, select, input {
       background-color: var(--button-bg);
       border: 1px solid var(--button-border);
+      border-radius: 4px;
       color: var(--text-color);
       padding: 5px 10px;
       cursor: pointer;
@@ -724,26 +719,39 @@ function generateViewHTML(context: {
     /* Advanced options panel (VS Code style) */
     .advanced-options {
       display: none;
-      flex-direction: column;
-      gap: 4px;
       padding: 8px 10px;
       background: var(--header-bg);
       border-bottom: 1px solid var(--header-border);
     }
     .advanced-options.visible {
+      display: block;
+    }
+    .advanced-columns {
       display: flex;
+      gap: 24px;
+    }
+    @media (max-width: 768px) {
+      .advanced-columns {
+        flex-direction: column;
+        gap: 8px;
+      }
+    }
+    .advanced-column {
+      flex: 1;
+      display: grid;
+      grid-template-columns: auto 1fr;
+      gap: 6px 10px;
+      align-items: center;
     }
     .advanced-row {
-      display: flex;
-      align-items: center;
-      gap: 8px;
+      display: contents;
     }
     .advanced-label {
       font-size: 12px;
       color: var(--text-color);
       opacity: 0.7;
-      min-width: 70px;
       text-align: right;
+      white-space: nowrap;
     }
     .advanced-input {
       flex: 1;
@@ -762,15 +770,19 @@ function generateViewHTML(context: {
     .advanced-input::placeholder {
       opacity: 0.5;
     }
-    /* Search row with options */
-    .search-row {
+    /* Search input with options */
+    .search-input-wrapper {
       display: flex;
       align-items: center;
-      gap: 8px;
+      gap: 4px;
+    }
+    .search-input-wrapper .advanced-input {
+      flex: 1;
     }
     .search-options {
       display: flex;
       gap: 2px;
+      flex-shrink: 0;
     }
     .search-option-btn {
       background: var(--button-bg);
@@ -793,6 +805,31 @@ function generateViewHTML(context: {
     }
     .search-option-btn abbr {
       text-decoration: none;
+    }
+    .checkbox-options {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 12px;
+      flex: 1;
+    }
+    .checkbox-label {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      font-size: 12px;
+      color: var(--text-color);
+      cursor: pointer;
+      padding: 4px 8px;
+      background: var(--button-bg);
+      border: 1px solid var(--button-border);
+      border-radius: 4px;
+    }
+    .checkbox-label:hover {
+      background: rgba(139, 92, 246, 0.1);
+    }
+    .checkbox-label input[type="checkbox"] {
+      margin: 0;
+      cursor: pointer;
     }
   </style>
 </head>
@@ -865,24 +902,57 @@ function generateViewHTML(context: {
     </div>
     </div>
     <div class="advanced-options" id="advancedOptions">
-      <div class="advanced-row">
-        <span class="advanced-label">files to include</span>
-        <input type="text" id="includeInput" class="advanced-input" placeholder="e.g. src/**/*.ts, **/*.tsx" onchange="updateFilters()">
-      </div>
-      <div class="advanced-row">
-        <span class="advanced-label">files to exclude</span>
-        <input type="text" id="excludeInput" class="advanced-input" placeholder="e.g. **/*.test.ts, **/node_modules/**" onchange="updateFilters()">
-      </div>
-      <div class="advanced-row search-row">
-        <span class="advanced-label">search</span>
-        <input type="text" id="searchInput" class="advanced-input" placeholder="Search in file contents" onchange="updateFilters()">
-        <div class="search-options">
-          <button class="search-option-btn" id="matchCaseBtn" onclick="toggleSearchOption('matchCase')" title="Match Case">
-            <abbr>Aa</abbr>
-          </button>
-          <button class="search-option-btn" id="regexBtn" onclick="toggleSearchOption('regex')" title="Use Regular Expression">
-            <abbr>.*</abbr>
-          </button>
+      <div class="advanced-columns">
+        <div class="advanced-column">
+          <div class="advanced-row">
+            <span class="advanced-label">files to include</span>
+            <input type="text" id="includeInput" class="advanced-input" placeholder="e.g. src/**/*.ts, **/*.tsx" onchange="updateFilters()">
+          </div>
+          <div class="advanced-row">
+            <span class="advanced-label">files to exclude</span>
+            <input type="text" id="excludeInput" class="advanced-input" placeholder="e.g. **/*.test.ts, **/node_modules/**" onchange="updateFilters()">
+          </div>
+          <div class="advanced-row">
+            <span class="advanced-label">search</span>
+            <div class="search-input-wrapper">
+              <input type="text" id="searchInput" class="advanced-input" placeholder="Search in file contents" onchange="updateFilters()">
+              <div class="search-options">
+                <button class="search-option-btn" id="matchCaseBtn" onclick="toggleSearchOption('matchCase')" title="Match Case">
+                  <abbr>Aa</abbr>
+                </button>
+                <button class="search-option-btn" id="regexBtn" onclick="toggleSearchOption('regex')" title="Use Regular Expression">
+                  <abbr>.*</abbr>
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+        <div class="advanced-column">
+          <div class="advanced-row">
+            <span class="advanced-label">max file size</span>
+            <input type="search" id="maxFileSizeInput" class="advanced-input" placeholder="no limit" onchange="updateFilters()">
+          </div>
+          <div class="advanced-row">
+            <span class="advanced-label">options</span>
+            <div class="checkbox-options">
+              <label class="checkbox-label" title="Add line numbers to file contents">
+                <input type="checkbox" id="linesCheckbox" checked onchange="updateFilters()">
+                <span>Line numbers</span>
+              </label>
+              <label class="checkbox-label" title="Include file tree in output">
+                <input type="checkbox" id="treeCheckbox" checked onchange="updateFilters()">
+                <span>Show tree</span>
+              </label>
+              <label class="checkbox-label" title="Include file contents in output">
+                <input type="checkbox" id="filesCheckbox" checked onchange="updateFilters()">
+                <span>Show files</span>
+              </label>
+              <label class="checkbox-label" title="Disable .genignore file processing">
+                <input type="checkbox" id="disableGenignoreCheckbox" onchange="updateFilters()">
+                <span>Ignore .genignore</span>
+              </label>
+            </div>
+          </div>
         </div>
       </div>
     </div>
@@ -1005,6 +1075,43 @@ function generateViewHTML(context: {
         url.searchParams.delete('searchRegularExp');
       }
 
+      // Max file size
+      const maxFileSizeVal = document.getElementById('maxFileSizeInput').value.trim();
+      if (maxFileSizeVal) {
+        url.searchParams.set('maxFileSize', maxFileSizeVal);
+      } else {
+        url.searchParams.delete('maxFileSize');
+      }
+
+      // Checkbox options
+      const linesChecked = document.getElementById('linesCheckbox').checked;
+      if (!linesChecked) {
+        url.searchParams.set('lines', 'false');
+      } else {
+        url.searchParams.delete('lines');
+      }
+
+      const treeChecked = document.getElementById('treeCheckbox').checked;
+      if (!treeChecked) {
+        url.searchParams.set('omitTree', 'true');
+      } else {
+        url.searchParams.delete('omitTree');
+      }
+
+      const filesChecked = document.getElementById('filesCheckbox').checked;
+      if (!filesChecked) {
+        url.searchParams.set('omitFiles', 'true');
+      } else {
+        url.searchParams.delete('omitFiles');
+      }
+
+      const disableGenignoreChecked = document.getElementById('disableGenignoreCheckbox').checked;
+      if (disableGenignoreChecked) {
+        url.searchParams.set('disableGenignore', 'true');
+      } else {
+        url.searchParams.delete('disableGenignore');
+      }
+
       window.location.href = url.toString();
     }
 
@@ -1083,6 +1190,15 @@ function generateViewHTML(context: {
       searchRegularExp = url.searchParams.get('searchRegularExp') === 'true';
       document.getElementById('matchCaseBtn').classList.toggle('active', searchMatchCase);
       document.getElementById('regexBtn').classList.toggle('active', searchRegularExp);
+
+      // Additional advanced options
+      document.getElementById('maxFileSizeInput').value = url.searchParams.get('maxFileSize') || '';
+
+      // Checkbox options (note: these are inverted - unchecked means the param is set)
+      document.getElementById('linesCheckbox').checked = url.searchParams.get('lines') !== 'false';
+      document.getElementById('treeCheckbox').checked = url.searchParams.get('omitTree') !== 'true';
+      document.getElementById('filesCheckbox').checked = url.searchParams.get('omitFiles') !== 'true';
+      document.getElementById('disableGenignoreCheckbox').checked = url.searchParams.get('disableGenignore') === 'true';
 
       // Initialize advanced panel visibility from localStorage
       const advancedVisible = localStorage.getItem('uithub-advanced-visible') === 'true';
@@ -1414,7 +1530,6 @@ export async function handleRepoEndpoint(
       excludeExt: params.excludeExt,
       includeDir: params.includeDir,
       excludeDir: params.excludeDir,
-      matchFilenames: params.matchFilenames,
       paths: path ? [path] : undefined,
       disableGenignore: params.disableGenignore,
       maxFileSize: params.maxFileSize,

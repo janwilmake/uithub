@@ -180,4 +180,35 @@ describe("formatRepoContent", () => {
 
     assert.ok(result.fileString.includes("https://example.com/image.png"));
   });
+
+  it("should omit tree when shouldOmitTree is true", () => {
+    const files: { [path: string]: ContentType } = {
+      "/src/index.ts": {
+        type: "content",
+        content: "const x = 1;",
+        hash: "abc",
+        size: 12,
+      },
+    };
+
+    const withTree = formatRepoContent(files, {
+      shouldAddLineNumbers: false,
+      shouldOmitFiles: false,
+      shouldOmitTree: false,
+    });
+
+    const withoutTree = formatRepoContent(files, {
+      shouldAddLineNumbers: false,
+      shouldOmitFiles: false,
+      shouldOmitTree: true,
+    });
+
+    // With tree should include tree characters
+    assert.ok(withTree.fileString.includes("└──") || withTree.fileString.includes("├──"));
+    // Without tree should NOT include tree characters
+    assert.ok(!withoutTree.fileString.includes("└──") && !withoutTree.fileString.includes("├──"));
+    // Both should still include file content
+    assert.ok(withTree.fileString.includes("const x = 1;"));
+    assert.ok(withoutTree.fileString.includes("const x = 1;"));
+  });
 });

@@ -26,7 +26,6 @@ export interface ParseOptions {
   excludeExt?: string[];
   includeDir?: string[];
   excludeDir?: string[];
-  matchFilenames?: string[];
   paths?: string[];
   disableGenignore?: boolean;
   maxFileSize?: number;

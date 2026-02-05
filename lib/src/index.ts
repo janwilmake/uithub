@@ -74,7 +74,6 @@ export async function parseGitHubZip(
     includeDir: options.includeDir,
     includeExt: options.includeExt,
     yamlFilter: options.yamlFilter,
-    matchFilenames: options.matchFilenames,
     paths: options.paths,
     disableGenignore: options.disableGenignore,
     maxFileSize: options.maxFileSize,
