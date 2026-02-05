@@ -4,7 +4,7 @@
   "account_id": "080fd9e0587416d2fa30ed1f527e2323",
   "compatibility_date": "2026-01-24",
   "main": "website/index.ts",
-  "assets": { "directory": "./" },
+  "assets": { "directory": "./public" },
   "kv_namespaces": [
     { "binding": "KV", "id": "698c335bd4e343089a51846f803c75e0" }
   ],

@@ -409,19 +409,349 @@ async function handleClientRegistration(
   }));
 }
 
+// ==================== OAUTH CONSENT SCREEN ====================
+
+function generateConsentScreenHTML(context: {
+  clientName: string;
+  clientId: string;
+  redirectUri: string;
+  scopes: string[];
+  user: { login: string; avatar_url: string };
+  formAction: string;
+  hiddenFields: Record<string, string>;
+}): string {
+  const { clientName, clientId, redirectUri, scopes, user, formAction, hiddenFields } = context;
+
+  const scopeDescriptions: Record<string, { label: string; description: string; warning?: string }> = {
+    read: {
+      label: "Read public repositories",
+      description: "Access and read content from public GitHub repositories through uithub",
+    },
+    repo: {
+      label: "Read private repositories",
+      description: "Access and read content from your private GitHub repositories through uithub",
+      warning: "This grants access to your private repositories. Only authorize apps you trust.",
+    },
+  };
+
+  const hasRepoScope = scopes.includes("repo");
+
+  const hiddenInputs = Object.entries(hiddenFields)
+    .map(([name, value]) => `<input type="hidden" name="${name}" value="${escapeHtml(value)}">`)
+    .join("\n        ");
+
+  return `<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Authorize ${escapeHtml(clientName)} - uithub</title>
+  <link rel="icon" type="image/png" sizes="32x32" href="/favicon-32x32.png">
+  <link rel="icon" type="image/png" sizes="16x16" href="/favicon-16x16.png">
+  <style>
+    * {
+      box-sizing: border-box;
+    }
+    body {
+      margin: 0;
+      font-family: system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      background: #000;
+      color: #f0f0f0;
+      min-height: 100vh;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 20px;
+    }
+    .consent-card {
+      background: #1a1a1a;
+      border-radius: 16px;
+      padding: 32px;
+      max-width: 480px;
+      width: 100%;
+      box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.5);
+    }
+    .logo {
+      text-align: center;
+      margin-bottom: 24px;
+    }
+    .logo h1 {
+      font-size: 32px;
+      font-weight: 800;
+      background: linear-gradient(135deg, #a855f7 0%, #ec4899 100%);
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+      background-clip: text;
+      margin: 0;
+    }
+    .user-info {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      background: #2a2a2a;
+      padding: 12px 16px;
+      border-radius: 10px;
+      margin-bottom: 24px;
+    }
+    .user-avatar {
+      width: 40px;
+      height: 40px;
+      border-radius: 50%;
+      border: 2px solid #a855f7;
+    }
+    .user-details {
+      flex: 1;
+    }
+    .user-label {
+      font-size: 12px;
+      color: #888;
+      margin-bottom: 2px;
+    }
+    .user-name {
+      font-weight: 600;
+      color: #f0f0f0;
+    }
+    .client-section {
+      text-align: center;
+      margin-bottom: 24px;
+    }
+    .client-name {
+      font-size: 24px;
+      font-weight: 700;
+      color: #f0f0f0;
+      margin: 0 0 8px;
+    }
+    .client-wants {
+      color: #888;
+      font-size: 14px;
+    }
+    .permissions-section {
+      margin-bottom: 24px;
+    }
+    .permissions-title {
+      font-size: 14px;
+      font-weight: 600;
+      color: #888;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+      margin-bottom: 12px;
+    }
+    .permission-item {
+      background: #2a2a2a;
+      padding: 14px 16px;
+      border-radius: 10px;
+      margin-bottom: 8px;
+    }
+    .permission-label {
+      font-weight: 600;
+      color: #f0f0f0;
+      margin-bottom: 4px;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+    .permission-icon {
+      font-size: 16px;
+    }
+    .permission-description {
+      font-size: 13px;
+      color: #888;
+      line-height: 1.4;
+    }
+    .warning-box {
+      background: rgba(234, 179, 8, 0.1);
+      border: 1px solid rgba(234, 179, 8, 0.3);
+      border-radius: 10px;
+      padding: 14px 16px;
+      margin-bottom: 24px;
+      display: flex;
+      gap: 12px;
+      align-items: flex-start;
+    }
+    .warning-icon {
+      font-size: 20px;
+      flex-shrink: 0;
+    }
+    .warning-text {
+      font-size: 13px;
+      color: #eab308;
+      line-height: 1.4;
+    }
+    .redirect-info {
+      background: #2a2a2a;
+      padding: 12px 16px;
+      border-radius: 10px;
+      margin-bottom: 24px;
+    }
+    .redirect-label {
+      font-size: 12px;
+      color: #888;
+      margin-bottom: 4px;
+    }
+    .redirect-uri {
+      font-family: ui-monospace, monospace;
+      font-size: 12px;
+      color: #a855f7;
+      word-break: break-all;
+    }
+    .button-group {
+      display: flex;
+      gap: 12px;
+    }
+    .btn {
+      flex: 1;
+      padding: 14px 24px;
+      border-radius: 10px;
+      font-size: 16px;
+      font-weight: 600;
+      cursor: pointer;
+      transition: all 0.2s;
+      border: none;
+    }
+    .btn-allow {
+      background: linear-gradient(135deg, #a855f7 0%, #ec4899 100%);
+      color: white;
+    }
+    .btn-allow:hover {
+      transform: translateY(-2px);
+      box-shadow: 0 10px 20px rgba(168, 85, 247, 0.3);
+    }
+    .btn-deny {
+      background: #2a2a2a;
+      color: #888;
+      border: 1px solid #444;
+    }
+    .btn-deny:hover {
+      background: #333;
+      color: #f0f0f0;
+    }
+    .footer-note {
+      text-align: center;
+      margin-top: 20px;
+      font-size: 12px;
+      color: #666;
+    }
+    .footer-note a {
+      color: #a855f7;
+      text-decoration: none;
+    }
+    .footer-note a:hover {
+      text-decoration: underline;
+    }
+  </style>
+</head>
+<body>
+  <div class="consent-card">
+    <div class="logo">
+      <h1>uithub</h1>
+    </div>
+    
+    <div class="user-info">
+      <img src="${escapeHtml(user.avatar_url)}" alt="${escapeHtml(user.login)}" class="user-avatar">
+      <div class="user-details">
+        <div class="user-label">Logged in as</div>
+        <div class="user-name">@${escapeHtml(user.login)}</div>
+      </div>
+    </div>
+
+    <div class="client-section">
+      <h2 class="client-name">${escapeHtml(clientName)}</h2>
+      <p class="client-wants">wants to access your uithub account</p>
+    </div>
+
+    <div class="permissions-section">
+      <div class="permissions-title">This will allow the app to:</div>
+      ${scopes.map(scope => {
+        const info = scopeDescriptions[scope] || { label: scope, description: `Access: ${scope}` };
+        return `
+      <div class="permission-item">
+        <div class="permission-label">
+          <span class="permission-icon">${scope === 'repo' ? '🔒' : '📖'}</span>
+          ${escapeHtml(info.label)}
+        </div>
+        <div class="permission-description">${escapeHtml(info.description)}</div>
+      </div>`;
+      }).join('')}
+    </div>
+
+    ${hasRepoScope ? `
+    <div class="warning-box">
+      <span class="warning-icon">⚠️</span>
+      <span class="warning-text">
+        This application is requesting access to your private repositories. Only authorize applications you trust.
+      </span>
+    </div>
+    ` : ''}
+
+    <div class="redirect-info">
+      <div class="redirect-label">After authorization, you'll be redirected to:</div>
+      <div class="redirect-uri">${escapeHtml(redirectUri)}</div>
+    </div>
+
+    <form method="POST" action="${escapeHtml(formAction)}">
+      ${hiddenInputs}
+      <div class="button-group">
+        <button type="submit" name="consent" value="deny" class="btn btn-deny">Deny</button>
+        <button type="submit" name="consent" value="allow" class="btn btn-allow">Allow</button>
+      </div>
+    </form>
+
+    <div class="footer-note">
+      By authorizing, you agree to uithub's <a href="/tos.html">Terms of Service</a>
+    </div>
+  </div>
+</body>
+</html>`;
+}
+
+function escapeHtml(str: string): string {
+  return str
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#039;');
+}
+
 // ==================== OAUTH AUTHORIZATION ENDPOINT ====================
 
 async function handleAuthorize(request: Request, env: Env): Promise<Response> {
   const url = new URL(request.url);
-  const clientId = url.searchParams.get("client_id");
-  const redirectUri = url.searchParams.get("redirect_uri");
-  const responseType = url.searchParams.get("response_type");
-  const scope = url.searchParams.get("scope") || "read";
-  const state = url.searchParams.get("state");
-  const codeChallenge = url.searchParams.get("code_challenge");
-  const codeChallengeMethod =
-    url.searchParams.get("code_challenge_method") || "plain";
-  const resource = url.searchParams.get("resource");
+  
+  // Handle both GET (show consent) and POST (process consent)
+  const isPost = request.method === "POST";
+  
+  let clientId: string | null;
+  let redirectUri: string | null;
+  let responseType: string | null;
+  let scope: string;
+  let state: string | null;
+  let codeChallenge: string | null;
+  let codeChallengeMethod: string;
+  let resource: string | null;
+  let consent: string | null = null;
+
+  if (isPost) {
+    const formData = await request.formData();
+    clientId = formData.get("client_id")?.toString() || null;
+    redirectUri = formData.get("redirect_uri")?.toString() || null;
+    responseType = formData.get("response_type")?.toString() || null;
+    scope = formData.get("scope")?.toString() || "read";
+    state = formData.get("state")?.toString() || null;
+    codeChallenge = formData.get("code_challenge")?.toString() || null;
+    codeChallengeMethod = formData.get("code_challenge_method")?.toString() || "plain";
+    resource = formData.get("resource")?.toString() || null;
+    consent = formData.get("consent")?.toString() || null;
+  } else {
+    clientId = url.searchParams.get("client_id");
+    redirectUri = url.searchParams.get("redirect_uri");
+    responseType = url.searchParams.get("response_type");
+    scope = url.searchParams.get("scope") || "read";
+    state = url.searchParams.get("state");
+    codeChallenge = url.searchParams.get("code_challenge");
+    codeChallengeMethod = url.searchParams.get("code_challenge_method") || "plain";
+    resource = url.searchParams.get("resource");
+  }
 
   if (!clientId || !redirectUri || responseType !== "code") {
     return new Response("Invalid authorization request", { status: 400 });
@@ -437,29 +767,73 @@ async function handleAuthorize(request: Request, env: Env): Promise<Response> {
   }
 
   const session = getSessionFromCookie(request);
+  
+  // User is logged in
   if (session.accessToken && session.user) {
-    const code = generateRandomString(32);
-    const authCode: AuthorizationCode = {
-      code,
-      client_id: clientId,
-      redirect_uri: redirectUri,
-      user_id: String(session.user.id),
-      github_access_token: session.accessToken,
-      scopes: scope,
-      code_challenge: codeChallenge || undefined,
-      code_challenge_method: codeChallenge ? codeChallengeMethod : undefined,
-      expires_at: Date.now() + 600000,
-      resource: resource || undefined,
-    };
-    await storeAuthorizationCode(authCode, env);
+    // Handle POST - user made a choice
+    if (isPost) {
+      // User denied access - redirect to homepage
+      if (consent === "deny") {
+        return Response.redirect(url.origin, 302);
+      }
+      
+      // User allowed access - create auth code and redirect
+      if (consent === "allow") {
+        const code = generateRandomString(32);
+        const authCode: AuthorizationCode = {
+          code,
+          client_id: clientId,
+          redirect_uri: redirectUri,
+          user_id: String(session.user.id),
+          github_access_token: session.accessToken,
+          scopes: scope,
+          code_challenge: codeChallenge || undefined,
+          code_challenge_method: codeChallenge ? codeChallengeMethod : undefined,
+          expires_at: Date.now() + 600000,
+          resource: resource || undefined,
+        };
+        await storeAuthorizationCode(authCode, env);
 
-    const redirectUrl = new URL(redirectUri);
-    redirectUrl.searchParams.set("code", code);
-    if (state) redirectUrl.searchParams.set("state", state);
+        const redirectUrl = new URL(redirectUri);
+        redirectUrl.searchParams.set("code", code);
+        if (state) redirectUrl.searchParams.set("state", state);
 
-    return Response.redirect(redirectUrl.toString(), 302);
+        return Response.redirect(redirectUrl.toString(), 302);
+      }
+    }
+    
+    // GET request - show consent screen
+    const scopes = scope.split(/[\s,]+/).filter(s => s);
+    const html = generateConsentScreenHTML({
+      clientName: client.client_name,
+      clientId: client.client_id,
+      redirectUri,
+      scopes,
+      user: session.user,
+      formAction: "/authorize",
+      hiddenFields: {
+        client_id: clientId,
+        redirect_uri: redirectUri,
+        response_type: responseType,
+        scope,
+        ...(state && { state }),
+        ...(codeChallenge && { code_challenge: codeChallenge }),
+        ...(codeChallenge && { code_challenge_method: codeChallengeMethod }),
+        ...(resource && { resource }),
+      },
+    });
+
+    return new Response(html, {
+      headers: {
+        "Content-Type": "text/html",
+        "X-XSS-Protection": "1; mode=block",
+        "X-Content-Type-Options": "nosniff",
+        "X-Frame-Options": "DENY",
+      },
+    });
   }
 
+  // User not logged in - redirect to GitHub OAuth
   const githubScope = scope.includes("repo") ? "repo" : "user:email";
   const codeVerifier = generateCodeVerifier();
   const githubCodeChallenge = await generateCodeChallenge(codeVerifier);
@@ -775,27 +1149,7 @@ async function handleCallback(request: Request, env: Env): Promise<Response> {
   const isLocalhost = url.hostname === "localhost";
 
   if (state.clientId && state.clientRedirectUri) {
-    const authCode = generateRandomString(32);
-    const authCodeData: AuthorizationCode = {
-      code: authCode,
-      client_id: state.clientId,
-      redirect_uri: state.clientRedirectUri,
-      user_id: String(userData.id),
-      github_access_token: tokenData.access_token,
-      scopes: state.scope,
-      code_challenge: state.codeChallenge,
-      code_challenge_method: state.codeChallengeMethod,
-      expires_at: Date.now() + 600000,
-      resource: state.resource,
-    };
-    await storeAuthorizationCode(authCodeData, env);
-
-    const redirectUrl = new URL(state.clientRedirectUri);
-    redirectUrl.searchParams.set("code", authCode);
-    if (state.clientState) {
-      redirectUrl.searchParams.set("state", state.clientState);
-    }
-
+    // Create session and redirect to /authorize to show consent screen
     const sessionData = {
       user: userData,
       accessToken: tokenData.access_token,
@@ -804,7 +1158,26 @@ async function handleCallback(request: Request, env: Env): Promise<Response> {
     };
     const sessionToken = btoa(JSON.stringify(sessionData));
 
-    const headers = new Headers({ Location: redirectUrl.toString() });
+    // Build the authorize URL with all original OAuth params
+    const authorizeUrl = new URL(`${url.origin}/authorize`);
+    authorizeUrl.searchParams.set("client_id", state.clientId);
+    authorizeUrl.searchParams.set("redirect_uri", state.clientRedirectUri);
+    authorizeUrl.searchParams.set("response_type", "code");
+    authorizeUrl.searchParams.set("scope", state.scope);
+    if (state.clientState) {
+      authorizeUrl.searchParams.set("state", state.clientState);
+    }
+    if (state.codeChallenge) {
+      authorizeUrl.searchParams.set("code_challenge", state.codeChallenge);
+    }
+    if (state.codeChallengeMethod) {
+      authorizeUrl.searchParams.set("code_challenge_method", state.codeChallengeMethod);
+    }
+    if (state.resource) {
+      authorizeUrl.searchParams.set("resource", state.resource);
+    }
+
+    const headers = new Headers({ Location: authorizeUrl.toString() });
     headers.append(
       "Set-Cookie",
       `oauth_state=; HttpOnly;${
