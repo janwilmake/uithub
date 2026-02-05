@@ -1,0 +1,33 @@
+{
+  "name": "uithub-cli",
+  "version": "1.0.0",
+  "description": "CLI tool for fetching GitHub repository contents via uithub with OAuth authentication",
+  "main": "uithub-cli.js",
+  "bin": {
+    "uithub": "./uithub-cli.js"
+  },
+  "scripts": {
+    "test": "node uithub-cli.js --help"
+  },
+  "keywords": [
+    "github",
+    "cli",
+    "oauth",
+    "repository",
+    "uithub",
+    "code-fetcher"
+  ],
+  "author": "",
+  "license": "MIT",
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/yourusername/uithub-cli.git"
+  },
+  "bugs": {
+    "url": "https://github.com/yourusername/uithub-cli/issues"
+  },
+  "homepage": "https://github.com/yourusername/uithub-cli#readme"
+}
