@@ -6,7 +6,7 @@
 
 ✅ uithub cli
 
-oauth consent screen
+✅ oauth consent screen
 
 uithub skill
 
