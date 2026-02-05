@@ -69,6 +69,34 @@ interface RepoAccess {
   default_branch?: string;
 }
 
+// ==================== CORS HEADERS ====================
+
+const CORS_HEADERS = {
+  "Access-Control-Allow-Origin": "*",
+  "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
+  "Access-Control-Allow-Headers": "Content-Type, Authorization, Accept",
+  "Access-Control-Max-Age": "86400",
+};
+
+function addCorsHeaders(response: Response): Response {
+  const newHeaders = new Headers(response.headers);
+  Object.entries(CORS_HEADERS).forEach(([key, value]) => {
+    newHeaders.set(key, value);
+  });
+  return new Response(response.body, {
+    status: response.status,
+    statusText: response.statusText,
+    headers: newHeaders,
+  });
+}
+
+function handleCorsPreflightRequest(): Response {
+  return new Response(null, {
+    status: 204,
+    headers: CORS_HEADERS,
+  });
+}
+
 // ==================== UTILITY FUNCTIONS ====================
 
 async function chargeForPrivateRepo(
@@ -1435,6 +1463,11 @@ export async function handleRepoEndpoint(
   request: Request,
   env: Env,
 ): Promise<Response> {
+  // Handle CORS preflight requests
+  if (request.method === "OPTIONS") {
+    return handleCorsPreflightRequest();
+  }
+
   const url = new URL(request.url);
   const [_, owner, repo, _page, branch, ...pathParts] = url.pathname.split("/");
   const path = pathParts.join("/");
@@ -1476,12 +1509,12 @@ export async function handleRepoEndpoint(
 
   // Handle unauthorized states
   if (modalState && responseFormat.type !== "html") {
-    return buildUnauthorizedResponse(modalState, url, modalContext);
+    return addCorsHeaders(buildUnauthorizedResponse(modalState, url, modalContext));
   }
 
   // If HTML and modal state, show placeholder
   if (modalState && responseFormat.type === "html") {
-    return buildPlaceholderHtmlResponse({
+    return addCorsHeaders(buildPlaceholderHtmlResponse({
       url,
       owner,
       repo,
@@ -1490,7 +1523,7 @@ export async function handleRepoEndpoint(
       repoAccess,
       modalState,
       modalContext,
-    });
+    }));
   }
 
   // Charge for private repo access
@@ -1504,7 +1537,7 @@ export async function handleRepoEndpoint(
       env,
     );
     if (!chargeResult.success) {
-      return new Response(chargeResult.message, { status: 402 });
+      return addCorsHeaders(new Response(chargeResult.message, { status: 402 }));
     }
   }
 
@@ -1521,7 +1554,7 @@ export async function handleRepoEndpoint(
     );
 
     if ("error" in fetchResult) {
-      return new Response(fetchResult.error, { status: fetchResult.status });
+      return addCorsHeaders(new Response(fetchResult.error, { status: fetchResult.status }));
     }
 
     const options: UithubOptions = {
@@ -1555,7 +1588,7 @@ export async function handleRepoEndpoint(
     );
 
     // Build and return response
-    return buildSuccessResponse(
+    return addCorsHeaders(buildSuccessResponse(
       responseFormat,
       result,
       params,
@@ -1567,8 +1600,8 @@ export async function handleRepoEndpoint(
       repoAccess,
       modalContext,
       branch || repoAccess.default_branch,
-    );
+    ));
   } catch (e: any) {
-    return new Response(`Error: ${e.message}`, { status: 500 });
+    return addCorsHeaders(new Response(`Error: ${e.message}`, { status: 500 }));
   }
 }
