@@ -30,13 +30,13 @@ export {
   matchesGlobPatterns,
   parseZipStreaming,
   type SearchOptions,
-} from "./parse-zip";
+} from "./parse-zip.js";
 export {
   filePathToNestedObject,
   filePathToTokenTree,
   formatRepoContent,
   tokenTreeToString,
-} from "./format";
+} from "./format.js";
 
 // ==================== MAIN API ====================
 
