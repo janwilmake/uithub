@@ -1,8 +1,5 @@
-import {
-  parseZipStreaming,
-  type StreamingParseContext,
-} from "./parse-zip";
-import { formatRepoContent } from "./format";
+import { parseZipStreaming, type StreamingParseContext } from "./parse-zip.js";
+import { formatRepoContent } from "./format.js";
 import {
   type ContentType,
   type FormatOptions,
@@ -11,7 +8,7 @@ import {
   type TokenTree,
   type UithubResult,
   CHARACTERS_PER_TOKEN,
-} from "./types";
+} from "./types.js";
 
 // Re-export types
 export {

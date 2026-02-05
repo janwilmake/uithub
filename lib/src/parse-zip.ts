@@ -4,7 +4,7 @@ import {
   type ContentType,
   type ParseOptions,
   type ParsedZipResult,
-} from "./types";
+} from "./types.js";
 
 // ==================== CONSTANTS ====================
 

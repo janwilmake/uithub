@@ -4,8 +4,8 @@ import {
   type FormatOptions,
   type NestedObject,
   type TokenTree,
-} from "./types";
-import { addLineNumbers } from "./parse-zip";
+} from "./types.js";
+import { addLineNumbers } from "./parse-zip.js";
 
 // ==================== TREE UTILITIES ====================
 
