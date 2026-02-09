@@ -127,7 +127,7 @@ export interface UserAccount {
 
 async function getRegisteredClient(
   clientId: string,
-  env: Env,
+  env: Env
 ): Promise<RegisteredClient | null> {
   const data = await env.KV.get(`client_${clientId}`, "json");
   return data as RegisteredClient | null;
@@ -135,23 +135,23 @@ async function getRegisteredClient(
 
 async function setRegisteredClient(
   client: RegisteredClient,
-  env: Env,
+  env: Env
 ): Promise<void> {
   await env.KV.put(`client_${client.client_id}`, JSON.stringify(client));
 }
 
 async function storeAuthorizationCode(
   code: AuthorizationCode,
-  env: Env,
+  env: Env
 ): Promise<void> {
   await env.KV.put(`auth_code_${code.code}`, JSON.stringify(code), {
-    expirationTtl: 600, // 10 minutes
+    expirationTtl: 600 // 10 minutes
   });
 }
 
 async function getAuthorizationCode(
   code: string,
-  env: Env,
+  env: Env
 ): Promise<AuthorizationCode | null> {
   const data = await env.KV.get(`auth_code_${code}`, "json");
   return data as AuthorizationCode | null;
@@ -163,13 +163,13 @@ async function deleteAuthorizationCode(code: string, env: Env): Promise<void> {
 
 async function storeAccessToken(token: AccessToken, env: Env): Promise<void> {
   await env.KV.put(`access_token_${token.token}`, JSON.stringify(token), {
-    expirationTtl: 86400, // 24 hours
+    expirationTtl: 86400 // 24 hours
   });
 }
 
 export async function getAccessTokenData(
   token: string,
-  env: Env,
+  env: Env
 ): Promise<AccessToken | null> {
   const data = await env.KV.get(`access_token_${token}`, "json");
   return data as AccessToken | null;
@@ -177,7 +177,7 @@ export async function getAccessTokenData(
 
 export async function getUserAccount(
   userId: string,
-  env: Env,
+  env: Env
 ): Promise<UserAccount | null> {
   const data = await env.KV.get(`user_${userId}`, "json");
   return data as UserAccount | null;
@@ -186,7 +186,7 @@ export async function getUserAccount(
 export async function setUserAccount(
   userId: string,
   account: UserAccount,
-  env: Env,
+  env: Env
 ): Promise<void> {
   await env.KV.put(`user_${userId}`, JSON.stringify(account));
 }
@@ -194,14 +194,14 @@ export async function setUserAccount(
 export async function createOrUpdateUser(
   userId: string,
   userData: { username: string; profile_picture: string },
-  env: Env,
+  env: Env
 ): Promise<UserAccount> {
   const existing = await getUserAccount(userId, env);
   if (existing) {
     const updated = {
       ...existing,
       username: userData.username,
-      profile_picture: userData.profile_picture,
+      profile_picture: userData.profile_picture
     };
     await setUserAccount(userId, updated, env);
     return updated;
@@ -212,7 +212,7 @@ export async function createOrUpdateUser(
     username: userData.username,
     profile_picture: userData.profile_picture,
     private_granted: false,
-    premium: false,
+    premium: false
   };
   await setUserAccount(userId, newAccount, env);
   return newAccount;
@@ -223,7 +223,7 @@ export async function createOrUpdateUser(
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
   "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
-  "Access-Control-Allow-Headers": "Content-Type, Authorization",
+  "Access-Control-Allow-Headers": "Content-Type, Authorization"
 };
 
 function withCors(response: Response): Response {
@@ -234,14 +234,14 @@ function withCors(response: Response): Response {
   return new Response(response.body, {
     status: response.status,
     statusText: response.statusText,
-    headers: newHeaders,
+    headers: newHeaders
   });
 }
 
 function handleCorsPreflightRequest(): Response {
   return new Response(null, {
     status: 204,
-    headers: corsHeaders,
+    headers: corsHeaders
   });
 }
 
@@ -267,7 +267,7 @@ async function generateCodeChallenge(verifier: string): Promise<string> {
   const data = encoder.encode(verifier);
   const digest = await crypto.subtle.digest("SHA-256", data);
   return btoa(
-    String.fromCharCode.apply(null, Array.from(new Uint8Array(digest))),
+    String.fromCharCode.apply(null, Array.from(new Uint8Array(digest)))
   )
     .replace(/\+/g, "-")
     .replace(/\//g, "_")
@@ -277,7 +277,7 @@ async function generateCodeChallenge(verifier: string): Promise<string> {
 async function verifyCodeChallenge(
   verifier: string,
   challenge: string,
-  method: string,
+  method: string
 ): Promise<boolean> {
   if (method === "S256") {
     const computed = await generateCodeChallenge(verifier);
@@ -316,7 +316,7 @@ export function getSessionFromCookie(request: Request): {
     return {
       accessToken: sessionData.accessToken,
       user: sessionData.user,
-      scopes: sessionData.scopes || "",
+      scopes: sessionData.scopes || ""
     };
   } catch {
     return { accessToken: null, user: null, scopes: "" };
@@ -334,34 +334,38 @@ export function getBearerToken(request: Request): string | null {
 // ==================== OAUTH WELL-KNOWN ENDPOINTS ====================
 
 function handleOAuthProtectedResource(url: URL): Response {
-  return withCors(Response.json({
-    resource: url.origin,
-    authorization_servers: [url.origin],
-  }));
+  return withCors(
+    Response.json({
+      resource: url.origin,
+      authorization_servers: [url.origin]
+    })
+  );
 }
 
 function handleOAuthAuthorizationServer(url: URL): Response {
-  return withCors(Response.json({
-    issuer: url.origin,
-    authorization_endpoint: `${url.origin}/authorize`,
-    token_endpoint: `${url.origin}/token`,
-    registration_endpoint: `${url.origin}/register`,
-    response_types_supported: ["code"],
-    grant_types_supported: ["authorization_code", "refresh_token"],
-    code_challenge_methods_supported: ["S256", "plain"],
-    scopes_supported: ["read", "repo"],
-    token_endpoint_auth_methods_supported: [
-      "client_secret_post",
-      "client_secret_basic",
-    ],
-  }));
+  return withCors(
+    Response.json({
+      issuer: url.origin,
+      authorization_endpoint: `${url.origin}/authorize`,
+      token_endpoint: `${url.origin}/token`,
+      registration_endpoint: `${url.origin}/register`,
+      response_types_supported: ["code"],
+      grant_types_supported: ["authorization_code", "refresh_token"],
+      code_challenge_methods_supported: ["S256", "plain"],
+      scopes_supported: ["read", "repo"],
+      token_endpoint_auth_methods_supported: [
+        "client_secret_post",
+        "client_secret_basic"
+      ]
+    })
+  );
 }
 
 // ==================== DYNAMIC CLIENT REGISTRATION ====================
 
 async function handleClientRegistration(
   request: Request,
-  env: Env,
+  env: Env
 ): Promise<Response> {
   if (request.method !== "POST") {
     return withCors(new Response("Method not allowed", { status: 405 }));
@@ -371,7 +375,9 @@ async function handleClientRegistration(
   try {
     body = await request.json();
   } catch {
-    return withCors(Response.json({ error: "invalid_request" }, { status: 400 }));
+    return withCors(
+      Response.json({ error: "invalid_request" }, { status: 400 })
+    );
   }
 
   const { redirect_uris, client_name } = body;
@@ -381,10 +387,15 @@ async function handleClientRegistration(
     !Array.isArray(redirect_uris) ||
     redirect_uris.length === 0
   ) {
-    return withCors(Response.json(
-      { error: "invalid_request", error_description: "redirect_uris required" },
-      { status: 400 },
-    ));
+    return withCors(
+      Response.json(
+        {
+          error: "invalid_request",
+          error_description: "redirect_uris required"
+        },
+        { status: 400 }
+      )
+    );
   }
 
   const clientId = `client_${generateRandomString(16)}`;
@@ -395,18 +406,20 @@ async function handleClientRegistration(
     client_secret: clientSecret,
     redirect_uris,
     client_name: client_name || "Unknown Client",
-    created_at: Date.now(),
+    created_at: Date.now()
   };
 
   await setRegisteredClient(client, env);
 
-  return withCors(Response.json({
-    client_id: clientId,
-    client_secret: clientSecret,
-    redirect_uris,
-    client_name: client.client_name,
-    token_endpoint_auth_method: "client_secret_post",
-  }));
+  return withCors(
+    Response.json({
+      client_id: clientId,
+      client_secret: clientSecret,
+      redirect_uris,
+      client_name: client.client_name,
+      token_endpoint_auth_method: "client_secret_post"
+    })
+  );
 }
 
 // ==================== OAUTH CONSENT SCREEN ====================
@@ -420,24 +433,41 @@ function generateConsentScreenHTML(context: {
   formAction: string;
   hiddenFields: Record<string, string>;
 }): string {
-  const { clientName, clientId, redirectUri, scopes, user, formAction, hiddenFields } = context;
+  const {
+    clientName,
+    clientId,
+    redirectUri,
+    scopes,
+    user,
+    formAction,
+    hiddenFields
+  } = context;
 
-  const scopeDescriptions: Record<string, { label: string; description: string; warning?: string }> = {
+  const scopeDescriptions: Record<
+    string,
+    { label: string; description: string; warning?: string }
+  > = {
     read: {
       label: "Read public repositories",
-      description: "Access and read content from public GitHub repositories through uithub",
+      description:
+        "Access and read content from public GitHub repositories through uithub"
     },
     repo: {
       label: "Read private repositories",
-      description: "Access and read content from your private GitHub repositories through uithub",
-      warning: "This grants access to your private repositories. Only authorize apps you trust.",
-    },
+      description:
+        "Access and read content from your private GitHub repositories through uithub",
+      warning:
+        "This grants access to your private repositories. Only authorize apps you trust."
+    }
   };
 
   const hasRepoScope = scopes.includes("repo");
 
   const hiddenInputs = Object.entries(hiddenFields)
-    .map(([name, value]) => `<input type="hidden" name="${name}" value="${escapeHtml(value)}">`)
+    .map(
+      ([name, value]) =>
+        `<input type="hidden" name="${name}" value="${escapeHtml(value)}">`
+    )
     .join("\n        ");
 
   return `<!DOCTYPE html>
@@ -661,27 +691,36 @@ function generateConsentScreenHTML(context: {
 
     <div class="permissions-section">
       <div class="permissions-title">This will allow the app to:</div>
-      ${scopes.map(scope => {
-        const info = scopeDescriptions[scope] || { label: scope, description: `Access: ${scope}` };
-        return `
+      ${scopes
+        .map((scope) => {
+          const info = scopeDescriptions[scope] || {
+            label: scope,
+            description: `Access: ${scope}`
+          };
+          return `
       <div class="permission-item">
         <div class="permission-label">
-          <span class="permission-icon">${scope === 'repo' ? '🔒' : '📖'}</span>
+          <span class="permission-icon">${scope === "repo" ? "🔒" : "📖"}</span>
           ${escapeHtml(info.label)}
         </div>
         <div class="permission-description">${escapeHtml(info.description)}</div>
       </div>`;
-      }).join('')}
+        })
+        .join("")}
     </div>
 
-    ${hasRepoScope ? `
+    ${
+      hasRepoScope
+        ? `
     <div class="warning-box">
       <span class="warning-icon">⚠️</span>
       <span class="warning-text">
         This application is requesting access to your private repositories. Only authorize applications you trust.
       </span>
     </div>
-    ` : ''}
+    `
+        : ""
+    }
 
     <div class="redirect-info">
       <div class="redirect-label">After authorization, you'll be redirected to:</div>
@@ -706,21 +745,21 @@ function generateConsentScreenHTML(context: {
 
 function escapeHtml(str: string): string {
   return str
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;')
-    .replace(/'/g, '&#039;');
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#039;");
 }
 
 // ==================== OAUTH AUTHORIZATION ENDPOINT ====================
 
 async function handleAuthorize(request: Request, env: Env): Promise<Response> {
   const url = new URL(request.url);
-  
+
   // Handle both GET (show consent) and POST (process consent)
   const isPost = request.method === "POST";
-  
+
   let clientId: string | null;
   let redirectUri: string | null;
   let responseType: string | null;
@@ -739,7 +778,8 @@ async function handleAuthorize(request: Request, env: Env): Promise<Response> {
     scope = formData.get("scope")?.toString() || "read";
     state = formData.get("state")?.toString() || null;
     codeChallenge = formData.get("code_challenge")?.toString() || null;
-    codeChallengeMethod = formData.get("code_challenge_method")?.toString() || "plain";
+    codeChallengeMethod =
+      formData.get("code_challenge_method")?.toString() || "plain";
     resource = formData.get("resource")?.toString() || null;
     consent = formData.get("consent")?.toString() || null;
   } else {
@@ -749,7 +789,8 @@ async function handleAuthorize(request: Request, env: Env): Promise<Response> {
     scope = url.searchParams.get("scope") || "read";
     state = url.searchParams.get("state");
     codeChallenge = url.searchParams.get("code_challenge");
-    codeChallengeMethod = url.searchParams.get("code_challenge_method") || "plain";
+    codeChallengeMethod =
+      url.searchParams.get("code_challenge_method") || "plain";
     resource = url.searchParams.get("resource");
   }
 
@@ -767,7 +808,7 @@ async function handleAuthorize(request: Request, env: Env): Promise<Response> {
   }
 
   const session = getSessionFromCookie(request);
-  
+
   // User is logged in
   if (session.accessToken && session.user) {
     // Handle POST - user made a choice
@@ -776,7 +817,7 @@ async function handleAuthorize(request: Request, env: Env): Promise<Response> {
       if (consent === "deny") {
         return Response.redirect(url.origin, 302);
       }
-      
+
       // User allowed access - create auth code and redirect
       if (consent === "allow") {
         const code = generateRandomString(32);
@@ -788,9 +829,11 @@ async function handleAuthorize(request: Request, env: Env): Promise<Response> {
           github_access_token: session.accessToken,
           scopes: scope,
           code_challenge: codeChallenge || undefined,
-          code_challenge_method: codeChallenge ? codeChallengeMethod : undefined,
+          code_challenge_method: codeChallenge
+            ? codeChallengeMethod
+            : undefined,
           expires_at: Date.now() + 600000,
-          resource: resource || undefined,
+          resource: resource || undefined
         };
         await storeAuthorizationCode(authCode, env);
 
@@ -801,9 +844,9 @@ async function handleAuthorize(request: Request, env: Env): Promise<Response> {
         return Response.redirect(redirectUrl.toString(), 302);
       }
     }
-    
+
     // GET request - show consent screen
-    const scopes = scope.split(/[\s,]+/).filter(s => s);
+    const scopes = scope.split(/[\s,]+/).filter((s) => s);
     const html = generateConsentScreenHTML({
       clientName: client.client_name,
       clientId: client.client_id,
@@ -819,8 +862,8 @@ async function handleAuthorize(request: Request, env: Env): Promise<Response> {
         ...(state && { state }),
         ...(codeChallenge && { code_challenge: codeChallenge }),
         ...(codeChallenge && { code_challenge_method: codeChallengeMethod }),
-        ...(resource && { resource }),
-      },
+        ...(resource && { resource })
+      }
     });
 
     return new Response(html, {
@@ -828,8 +871,8 @@ async function handleAuthorize(request: Request, env: Env): Promise<Response> {
         "Content-Type": "text/html",
         "X-XSS-Protection": "1; mode=block",
         "X-Content-Type-Options": "nosniff",
-        "X-Frame-Options": "DENY",
-      },
+        "X-Frame-Options": "DENY"
+      }
     });
   }
 
@@ -846,7 +889,7 @@ async function handleAuthorize(request: Request, env: Env): Promise<Response> {
     clientState: state || undefined,
     codeChallenge: codeChallenge || undefined,
     codeChallengeMethod: codeChallenge ? codeChallengeMethod : undefined,
-    resource: resource || undefined,
+    resource: resource || undefined
   };
 
   const stateString = btoa(JSON.stringify(oauthState));
@@ -866,8 +909,8 @@ async function handleAuthorize(request: Request, env: Env): Promise<Response> {
       Location: githubUrl.toString(),
       "Set-Cookie": `oauth_state=${encodeURIComponent(stateString)}; HttpOnly;${
         isLocalhost ? "" : " Secure;"
-      } SameSite=Lax; Max-Age=600; Path=/`,
-    },
+      } SameSite=Lax; Max-Age=600; Path=/`
+    }
   });
 }
 
@@ -890,19 +933,23 @@ async function handleToken(request: Request, env: Env): Promise<Response> {
   } else if (contentType.includes("application/json")) {
     body = await request.json();
   } else {
-    return withCors(Response.json(
-      {
-        error: "invalid_request",
-        error_description: "Unsupported content type",
-      },
-      { status: 400 },
-    ));
+    return withCors(
+      Response.json(
+        {
+          error: "invalid_request",
+          error_description: "Unsupported content type"
+        },
+        { status: 400 }
+      )
+    );
   }
 
   const grantType = body.grant_type;
 
   if (grantType !== "authorization_code") {
-    return withCors(Response.json({ error: "unsupported_grant_type" }, { status: 400 }));
+    return withCors(
+      Response.json({ error: "unsupported_grant_type" }, { status: 400 })
+    );
   }
 
   const code = body.code;
@@ -912,71 +959,98 @@ async function handleToken(request: Request, env: Env): Promise<Response> {
   const codeVerifier = body.code_verifier;
 
   if (!code || !redirectUri || !clientId) {
-    return withCors(Response.json(
-      {
-        error: "invalid_request",
-        error_description: "Missing required parameters",
-      },
-      { status: 400 },
-    ));
+    return withCors(
+      Response.json(
+        {
+          error: "invalid_request",
+          error_description: "Missing required parameters"
+        },
+        { status: 400 }
+      )
+    );
   }
 
   const client = await getRegisteredClient(clientId, env);
   if (!client) {
-    return withCors(Response.json({ error: "invalid_client" }, { status: 401 }));
+    return withCors(
+      Response.json({ error: "invalid_client" }, { status: 401 })
+    );
   }
 
   if (clientSecret && client.client_secret !== clientSecret) {
-    return withCors(Response.json({ error: "invalid_client" }, { status: 401 }));
+    return withCors(
+      Response.json({ error: "invalid_client" }, { status: 401 })
+    );
   }
 
   const authCode = await getAuthorizationCode(code, env);
   if (!authCode) {
-    return withCors(Response.json(
-      { error: "invalid_grant", error_description: "Invalid or expired code" },
-      { status: 400 },
-    ));
+    return withCors(
+      Response.json(
+        {
+          error: "invalid_grant",
+          error_description: "Invalid or expired code"
+        },
+        { status: 400 }
+      )
+    );
   }
 
   if (authCode.client_id !== clientId) {
-    return withCors(Response.json(
-      { error: "invalid_grant", error_description: "Client mismatch" },
-      { status: 400 },
-    ));
+    return withCors(
+      Response.json(
+        { error: "invalid_grant", error_description: "Client mismatch" },
+        { status: 400 }
+      )
+    );
   }
 
   if (authCode.redirect_uri !== redirectUri) {
-    return withCors(Response.json(
-      { error: "invalid_grant", error_description: "Redirect URI mismatch" },
-      { status: 400 },
-    ));
+    return withCors(
+      Response.json(
+        { error: "invalid_grant", error_description: "Redirect URI mismatch" },
+        { status: 400 }
+      )
+    );
   }
 
   if (Date.now() > authCode.expires_at) {
     await deleteAuthorizationCode(code, env);
-    return withCors(Response.json(
-      { error: "invalid_grant", error_description: "Code expired" },
-      { status: 400 },
-    ));
+    return withCors(
+      Response.json(
+        { error: "invalid_grant", error_description: "Code expired" },
+        { status: 400 }
+      )
+    );
   }
 
   if (authCode.code_challenge) {
     if (!codeVerifier) {
-      return withCors(Response.json(
-        { error: "invalid_grant", error_description: "code_verifier required" },
-        { status: 400 },
-      ));
+      return withCors(
+        Response.json(
+          {
+            error: "invalid_grant",
+            error_description: "code_verifier required"
+          },
+          { status: 400 }
+        )
+      );
     }
     const valid = await verifyCodeChallenge(
       codeVerifier,
       authCode.code_challenge,
-      authCode.code_challenge_method || "plain",
+      authCode.code_challenge_method || "plain"
     );
     if (!valid) {
-      return withCors(Response.json(
-        { error: "invalid_grant", error_description: "Invalid code_verifier" },
-        { status: 400 },
-      ));
+      return withCors(
+        Response.json(
+          {
+            error: "invalid_grant",
+            error_description: "Invalid code_verifier"
+          },
+          { status: 400 }
+        )
+      );
     }
   }
 
@@ -990,7 +1064,7 @@ async function handleToken(request: Request, env: Env): Promise<Response> {
     github_access_token: authCode.github_access_token,
     scopes: authCode.scopes,
     expires_at: Date.now() + 86400000,
-    resource: authCode.resource,
+    resource: authCode.resource
   };
 
   await storeAccessToken(tokenData, env);
@@ -1000,7 +1074,7 @@ async function handleToken(request: Request, env: Env): Promise<Response> {
   const existingAccess =
     ((await env.KV.get(clientAccessKey, "json")) as ClientAccess[]) || [];
   const existingIndex = existingAccess.findIndex(
-    (c) => c.client_id === clientId,
+    (c) => c.client_id === clientId
   );
 
   if (existingIndex !== -1) {
@@ -1013,18 +1087,20 @@ async function handleToken(request: Request, env: Env): Promise<Response> {
       client_id: clientId,
       client_name: client.client_name,
       created_at: Date.now(),
-      scopes: authCode.scopes,
+      scopes: authCode.scopes
     });
   }
 
   await env.KV.put(clientAccessKey, JSON.stringify(existingAccess));
 
-  return withCors(Response.json({
-    access_token: accessToken,
-    token_type: "Bearer",
-    expires_in: 86400,
-    scope: authCode.scopes,
-  }));
+  return withCors(
+    Response.json({
+      access_token: accessToken,
+      token_type: "Bearer",
+      expires_in: 86400,
+      scope: authCode.scopes
+    })
+  );
 }
 
 // ==================== BROWSER LOGIN FLOW ====================
@@ -1032,7 +1108,7 @@ async function handleToken(request: Request, env: Env): Promise<Response> {
 async function handleBrowserLogin(
   request: Request,
   env: Env,
-  scope: string,
+  scope: string
 ): Promise<Response> {
   const url = new URL(request.url);
   const isLocalhost = url.hostname === "localhost";
@@ -1045,7 +1121,7 @@ async function handleBrowserLogin(
     redirectTo,
     codeVerifier,
     scope,
-    resource: resource || undefined,
+    resource: resource || undefined
   };
   const stateString = btoa(JSON.stringify(state));
 
@@ -1063,8 +1139,8 @@ async function handleBrowserLogin(
       Location: githubUrl.toString(),
       "Set-Cookie": `oauth_state=${encodeURIComponent(stateString)}; HttpOnly;${
         isLocalhost ? "" : " Secure;"
-      } SameSite=Lax; Max-Age=600; Path=/`,
-    },
+      } SameSite=Lax; Max-Age=600; Path=/`
+    }
   });
 }
 
@@ -1097,16 +1173,16 @@ async function handleCallback(request: Request, env: Env): Promise<Response> {
       method: "POST",
       headers: {
         Accept: "application/json",
-        "Content-Type": "application/json",
+        "Content-Type": "application/json"
       },
       body: JSON.stringify({
         client_id: env.GITHUB_CLIENT_ID,
         client_secret: env.GITHUB_CLIENT_SECRET,
         code,
         redirect_uri: `${url.origin}/callback`,
-        code_verifier: state.codeVerifier,
-      }),
-    },
+        code_verifier: state.codeVerifier
+      })
+    }
   );
 
   const tokenData = (await tokenResponse.json()) as any;
@@ -1118,8 +1194,8 @@ async function handleCallback(request: Request, env: Env): Promise<Response> {
     headers: {
       Authorization: `Bearer ${tokenData.access_token}`,
       Accept: "application/vnd.github.v3+json",
-      "User-Agent": "uithub",
-    },
+      "User-Agent": "uithub"
+    }
   });
 
   if (!userResponse.ok) {
@@ -1133,9 +1209,9 @@ async function handleCallback(request: Request, env: Env): Promise<Response> {
     String(userData.id),
     {
       username: userData.login,
-      profile_picture: userData.avatar_url,
+      profile_picture: userData.avatar_url
     },
-    env,
+    env
   );
 
   if (grantedScopes.includes("repo")) {
@@ -1154,7 +1230,7 @@ async function handleCallback(request: Request, env: Env): Promise<Response> {
       user: userData,
       accessToken: tokenData.access_token,
       scopes: grantedScopes,
-      exp: Date.now() + 7 * 24 * 3600 * 1000,
+      exp: Date.now() + 7 * 24 * 3600 * 1000
     };
     const sessionToken = btoa(JSON.stringify(sessionData));
 
@@ -1171,7 +1247,10 @@ async function handleCallback(request: Request, env: Env): Promise<Response> {
       authorizeUrl.searchParams.set("code_challenge", state.codeChallenge);
     }
     if (state.codeChallengeMethod) {
-      authorizeUrl.searchParams.set("code_challenge_method", state.codeChallengeMethod);
+      authorizeUrl.searchParams.set(
+        "code_challenge_method",
+        state.codeChallengeMethod
+      );
     }
     if (state.resource) {
       authorizeUrl.searchParams.set("resource", state.resource);
@@ -1182,13 +1261,13 @@ async function handleCallback(request: Request, env: Env): Promise<Response> {
       "Set-Cookie",
       `oauth_state=; HttpOnly;${
         isLocalhost ? "" : " Secure;"
-      } SameSite=Lax; Max-Age=0; Path=/`,
+      } SameSite=Lax; Max-Age=0; Path=/`
     );
     headers.append(
       "Set-Cookie",
       `session=${sessionToken}; HttpOnly;${
         isLocalhost ? "" : " Secure;"
-      } SameSite=Lax; Max-Age=${7 * 24 * 60 * 60}; Path=/`,
+      } SameSite=Lax; Max-Age=${7 * 24 * 60 * 60}; Path=/`
     );
 
     return new Response(null, { status: 302, headers });
@@ -1198,7 +1277,7 @@ async function handleCallback(request: Request, env: Env): Promise<Response> {
     user: userData,
     accessToken: tokenData.access_token,
     scopes: grantedScopes,
-    exp: Date.now() + 7 * 24 * 3600 * 1000,
+    exp: Date.now() + 7 * 24 * 3600 * 1000
   };
   const sessionToken = btoa(JSON.stringify(sessionData));
 
@@ -1207,13 +1286,13 @@ async function handleCallback(request: Request, env: Env): Promise<Response> {
     "Set-Cookie",
     `oauth_state=; HttpOnly;${
       isLocalhost ? "" : " Secure;"
-    } SameSite=Lax; Max-Age=0; Path=/`,
+    } SameSite=Lax; Max-Age=0; Path=/`
   );
   headers.append(
     "Set-Cookie",
     `session=${sessionToken}; HttpOnly;${
       isLocalhost ? "" : " Secure;"
-    } SameSite=Lax; Max-Age=${7 * 24 * 60 * 60}; Path=/`,
+    } SameSite=Lax; Max-Age=${7 * 24 * 60 * 60}; Path=/`
   );
 
   return new Response(null, { status: 302, headers });
@@ -1229,34 +1308,28 @@ function handleLogout(request: Request): Response {
       Location: redirectTo,
       "Set-Cookie": `session=; HttpOnly;${
         isLocalhost ? "" : " Secure;"
-      } SameSite=Lax; Max-Age=0; Path=/`,
-    },
+      } SameSite=Lax; Max-Age=0; Path=/`
+    }
   });
 }
 
 // ==================== WWW-AUTHENTICATE HELPER ====================
 
-export function createWWWAuthenticateHeader(
-  url: URL,
-  scope: string = "read",
-): string {
+export function createWWWAuthenticateHeader(url: URL): string {
   return (
     `Bearer realm="${url.hostname}", ` +
     `resource_metadata="${url.origin}/.well-known/oauth-protected-resource", ` +
-    `scope="${scope}"`
+    `scope="read repo"`
   );
 }
 
-export function createUnauthorizedResponse(
-  url: URL,
-  scope: string = "read",
-): Response {
+export function createUnauthorizedResponse(url: URL): Response {
   return new Response("Unauthorized. Authentication required.", {
     status: 401,
     headers: {
-      "WWW-Authenticate": createWWWAuthenticateHeader(url, scope),
-      "Content-Type": "text/plain",
-    },
+      "WWW-Authenticate": createWWWAuthenticateHeader(url),
+      "Content-Type": "text/plain"
+    }
   });
 }
 
@@ -1264,7 +1337,7 @@ export function createUnauthorizedResponse(
 
 export async function authMiddleware(
   request: Request,
-  env: Env,
+  env: Env
 ): Promise<Response | null> {
   const url = new URL(request.url);
 
@@ -1342,7 +1415,7 @@ export const getUser = async (request: Request, env: Env) => {
           currentUser = {
             id: parseInt(userId),
             login: userAccount.username,
-            avatar_url: userAccount.profile_picture,
+            avatar_url: userAccount.profile_picture
           };
           sessionScopes = userAccount.private_granted ? "repo" : "read";
           // Update last_used timestamp for the API key
@@ -1354,7 +1427,7 @@ export const getUser = async (request: Request, env: Env) => {
             apiKeys[keyIndex].last_used = Date.now();
             await env.KV.put(
               `user_api_keys_${userId}`,
-              JSON.stringify(apiKeys),
+              JSON.stringify(apiKeys)
             );
           }
         }
@@ -1368,8 +1441,8 @@ export const getUser = async (request: Request, env: Env) => {
           headers: {
             Authorization: `Bearer ${githubAccessToken}`,
             Accept: "application/vnd.github.v3+json",
-            "User-Agent": "uithub",
-          },
+            "User-Agent": "uithub"
+          }
         });
         if (userResponse.ok) {
           currentUser = await userResponse.json();

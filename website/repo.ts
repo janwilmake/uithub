@@ -5,7 +5,7 @@ import {
   getUserAccount,
   setUserAccount,
   createUnauthorizedResponse,
-  getUser,
+  getUser
 } from "./auth";
 import {
   parseGitHubZip,
@@ -13,7 +13,7 @@ import {
   type ContentType,
   type TokenTree,
   type NestedObject,
-  type UithubOptions,
+  type UithubOptions
 } from "../lib/src";
 
 // ==================== CONSTANTS ====================
@@ -75,7 +75,7 @@ const CORS_HEADERS = {
   "Access-Control-Allow-Origin": "*",
   "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
   "Access-Control-Allow-Headers": "Content-Type, Authorization, Accept",
-  "Access-Control-Max-Age": "86400",
+  "Access-Control-Max-Age": "86400"
 };
 
 function addCorsHeaders(response: Response): Response {
@@ -86,14 +86,14 @@ function addCorsHeaders(response: Response): Response {
   return new Response(response.body, {
     status: response.status,
     statusText: response.statusText,
-    headers: newHeaders,
+    headers: newHeaders
   });
 }
 
 function handleCorsPreflightRequest(): Response {
   return new Response(null, {
     status: 204,
-    headers: CORS_HEADERS,
+    headers: CORS_HEADERS
   });
 }
 
@@ -101,7 +101,7 @@ function handleCorsPreflightRequest(): Response {
 
 async function chargeForPrivateRepo(
   userId: string,
-  env: Env,
+  env: Env
 ): Promise<{ success: boolean; message: string }> {
   const account = await getUserAccount(userId, env);
   if (!account) {
@@ -126,8 +126,8 @@ function escapeHTML(str: string): string {
           "<": "&lt;",
           ">": "&gt;",
           "'": "&#39;",
-          '"': "&quot;",
-        })[tag] || tag,
+          '"': "&quot;"
+        })[tag] || tag
     )
     .replace(/\u0000/g, "\uFFFD")
     .replace(/\u2028/g, "\\u2028")
@@ -140,7 +140,7 @@ function determineModalState(
   currentUser: any,
   sessionScopes: string,
   userAccount: UserAccount | null,
-  repoAccess: RepoAccess,
+  repoAccess: RepoAccess
 ): ModalState {
   if (!currentUser) return "login_required";
 
@@ -161,10 +161,10 @@ function determineModalState(
 function buildModalContextUrls(
   url: URL,
   env: Env,
-  currentUser: any,
+  currentUser: any
 ): { loginUrl: string; privateAccessUrl: string; paymentLink: string | null } {
   const redirectParams = `resource=${encodeURIComponent(
-    url.origin,
+    url.origin
   )}&redirect_to=${encodeURIComponent(url.pathname + url.search)}`;
   const loginUrl = `${url.origin}/login?scope=user:email&${redirectParams}`;
   const privateAccessUrl = `${url.origin}/login?scope=repo&${redirectParams}`;
@@ -209,7 +209,7 @@ function parseRepoRequestParams(url: URL): RepoRequestParams {
     // Search options
     search: url.searchParams.get("search") || undefined,
     searchMatchCase: url.searchParams.get("searchMatchCase") === "true",
-    searchRegularExp: url.searchParams.get("searchRegularExp") === "true",
+    searchRegularExp: url.searchParams.get("searchRegularExp") === "true"
   };
 }
 
@@ -245,16 +245,16 @@ function determineResponseFormat(request: Request, url: URL): ResponseFormat {
 async function checkRepoAccess(
   owner: string,
   repo: string,
-  token?: string | null,
+  token?: string | null
 ): Promise<RepoAccess> {
   const headers: HeadersInit = {
     Accept: "application/vnd.github.v3+json",
-    "User-Agent": "uithub",
+    "User-Agent": "uithub"
   };
   if (token) headers["Authorization"] = `token ${token}`;
   const response = await fetch(
     `https://api.github.com/repos/${owner}/${repo}`,
-    { headers },
+    { headers }
   );
   if (response.status === 404) {
     return { exists: false, isPrivate: true };
@@ -266,7 +266,7 @@ async function checkRepoAccess(
   return {
     exists: true,
     isPrivate: data.private || false,
-    default_branch: data.default_branch,
+    default_branch: data.default_branch
   };
 }
 
@@ -281,7 +281,7 @@ function generateModalHTML(state: ModalState, context: ModalContext): string {
     paymentLink,
     credit,
     username,
-    profilePicture,
+    profilePicture
   } = context;
 
   const modalStyles = `
@@ -554,7 +554,7 @@ function generateViewHTML(context: {
     url,
     default_branch,
     modalState,
-    modalContext,
+    modalContext
   } = context;
   const contentBlurStyle = modalState
     ? "pointer-events: none; user-select: none;"
@@ -995,7 +995,7 @@ function generateViewHTML(context: {
     const data = ${JSON.stringify({
       default_branch,
       tokens: totalTokens,
-      totalLines,
+      totalLines
     })};
     const tree = ${JSON.stringify(tree)};
     const tokenTree = ${JSON.stringify(tokenTree)};
@@ -1264,26 +1264,26 @@ function generateViewHTML(context: {
 function buildUnauthorizedResponse(
   modalState: ModalState,
   url: URL,
-  modalContext: ModalContext,
+  modalContext: ModalContext
 ): Response {
   if (modalState === "login_required") {
-    return createUnauthorizedResponse(url, "read");
+    return createUnauthorizedResponse(url);
   } else if (modalState === "private_access_required") {
     return new Response(
       "Private repository access required. Please authenticate with 'repo' scope.",
       {
         status: 403,
         headers: {
-          "WWW-Authenticate": `Bearer realm="${url.hostname}", resource_metadata="${url.origin}/.well-known/oauth-protected-resource", scope="repo"`,
-        },
-      },
+          "WWW-Authenticate": `Bearer realm="${url.hostname}", resource_metadata="${url.origin}/.well-known/oauth-protected-resource", scope="read repo"`
+        }
+      }
     );
   } else {
     return new Response(
       `Insufficient credit. Balance: $${(
         (modalContext.credit || 0) / 100
       ).toFixed(2)}. Required: $0.01`,
-      { status: 402 },
+      { status: 402 }
     );
   }
 }
@@ -1306,7 +1306,7 @@ function buildPlaceholderHtmlResponse(context: {
     path,
     repoAccess,
     modalState,
-    modalContext,
+    modalContext
   } = context;
 
   const placeholderFileString =
@@ -1332,7 +1332,7 @@ function buildPlaceholderHtmlResponse(context: {
     tokenTree: placeholderTokenTree,
     default_branch: repoAccess.default_branch,
     modalState,
-    modalContext,
+    modalContext
   });
 
   return new Response(viewHtml, {
@@ -1340,8 +1340,8 @@ function buildPlaceholderHtmlResponse(context: {
       "Content-Type": "text/html",
       "X-XSS-Protection": "1; mode=block",
       "X-Content-Type-Options": "nosniff",
-      "X-Frame-Options": "DENY",
-    },
+      "X-Frame-Options": "DENY"
+    }
   });
 }
 
@@ -1350,7 +1350,7 @@ async function fetchZipStream(
   repo: string,
   branch: string | undefined,
   githubAccessToken: string | null,
-  repoAccess: RepoAccess,
+  repoAccess: RepoAccess
 ): Promise<
   | { stream: ReadableStream<Uint8Array>; status: number }
   | { error: string; status: number }
@@ -1371,7 +1371,7 @@ async function fetchZipStream(
   if (!response.ok || !response.body) {
     return {
       error: `Failed to fetch repository: ${response.status}`,
-      status: response.status,
+      status: response.status
     };
   }
 
@@ -1397,7 +1397,7 @@ function buildSuccessResponse(
   path: string,
   repoAccess: RepoAccess,
   modalContext: ModalContext,
-  shaOrBranch?: string,
+  shaOrBranch?: string
 ): Response {
   if (format.type === "html") {
     const branchPart = branch ? ` at ${branch}` : "";
@@ -1416,7 +1416,7 @@ function buildSuccessResponse(
       tokenTree: result.tokenTree,
       default_branch: shaOrBranch || repoAccess.default_branch,
       modalState: null,
-      modalContext,
+      modalContext
     });
 
     return new Response(viewHtml, {
@@ -1424,14 +1424,14 @@ function buildSuccessResponse(
         "Content-Type": "text/html",
         "X-XSS-Protection": "1; mode=block",
         "X-Content-Type-Options": "nosniff",
-        "X-Frame-Options": "DENY",
-      },
+        "X-Frame-Options": "DENY"
+      }
     });
   }
 
   if (format.type === "markdown") {
     return new Response(result.fileString, {
-      headers: { "Content-Type": "text/markdown; charset=utf-8" },
+      headers: { "Content-Type": "text/markdown; charset=utf-8" }
     });
   }
 
@@ -1440,20 +1440,20 @@ function buildSuccessResponse(
       tokens: result.tokens,
       totalTokens: result.totalTokens,
       characters: result.totalTokens * CHARACTERS_PER_TOKEN,
-      lines: result.totalLines,
+      lines: result.totalLines
     },
     tree: params.shouldOmitTree ? undefined : result.tokenTree,
-    files: params.shouldOmitFiles ? undefined : result.files,
+    files: params.shouldOmitFiles ? undefined : result.files
   };
 
   if (format.type === "yaml") {
     return new Response(stringify(body), {
-      headers: { "Content-Type": "text/yaml" },
+      headers: { "Content-Type": "text/yaml" }
     });
   }
 
   return new Response(JSON.stringify(body, undefined, 2), {
-    headers: { "Content-Type": "application/json" },
+    headers: { "Content-Type": "application/json" }
   });
 }
 
@@ -1461,7 +1461,7 @@ function buildSuccessResponse(
 
 export async function handleRepoEndpoint(
   request: Request,
-  env: Env,
+  env: Env
 ): Promise<Response> {
   // Handle CORS preflight requests
   if (request.method === "OPTIONS") {
@@ -1474,7 +1474,7 @@ export async function handleRepoEndpoint(
 
   const { currentUser, githubAccessToken, sessionScopes } = await getUser(
     request,
-    env,
+    env
   );
   const responseFormat = determineResponseFormat(request, url);
 
@@ -1488,7 +1488,7 @@ export async function handleRepoEndpoint(
   const { loginUrl, privateAccessUrl, paymentLink } = buildModalContextUrls(
     url,
     env,
-    currentUser,
+    currentUser
   );
   const modalContext: ModalContext = {
     loginUrl,
@@ -1496,7 +1496,7 @@ export async function handleRepoEndpoint(
     paymentLink,
     credit: userAccount?.credit || 0,
     username: currentUser?.login,
-    profilePicture: currentUser?.avatar_url,
+    profilePicture: currentUser?.avatar_url
   };
 
   // Determine modal state
@@ -1504,26 +1504,30 @@ export async function handleRepoEndpoint(
     currentUser,
     sessionScopes,
     userAccount,
-    repoAccess,
+    repoAccess
   );
 
   // Handle unauthorized states
   if (modalState && responseFormat.type !== "html") {
-    return addCorsHeaders(buildUnauthorizedResponse(modalState, url, modalContext));
+    return addCorsHeaders(
+      buildUnauthorizedResponse(modalState, url, modalContext)
+    );
   }
 
   // If HTML and modal state, show placeholder
   if (modalState && responseFormat.type === "html") {
-    return addCorsHeaders(buildPlaceholderHtmlResponse({
-      url,
-      owner,
-      repo,
-      branch,
-      path,
-      repoAccess,
-      modalState,
-      modalContext,
-    }));
+    return addCorsHeaders(
+      buildPlaceholderHtmlResponse({
+        url,
+        owner,
+        repo,
+        branch,
+        path,
+        repoAccess,
+        modalState,
+        modalContext
+      })
+    );
   }
 
   // Charge for private repo access
@@ -1534,10 +1538,12 @@ export async function handleRepoEndpoint(
   ) {
     const chargeResult = await chargeForPrivateRepo(
       String(currentUser!.id),
-      env,
+      env
     );
     if (!chargeResult.success) {
-      return addCorsHeaders(new Response(chargeResult.message, { status: 402 }));
+      return addCorsHeaders(
+        new Response(chargeResult.message, { status: 402 })
+      );
     }
   }
 
@@ -1550,11 +1556,13 @@ export async function handleRepoEndpoint(
       repo,
       branch,
       githubAccessToken,
-      repoAccess,
+      repoAccess
     );
 
     if ("error" in fetchResult) {
-      return addCorsHeaders(new Response(fetchResult.error, { status: fetchResult.status }));
+      return addCorsHeaders(
+        new Response(fetchResult.error, { status: fetchResult.status })
+      );
     }
 
     const options: UithubOptions = {
@@ -1576,7 +1584,7 @@ export async function handleRepoEndpoint(
       // Search options
       search: params.search,
       searchMatchCase: params.searchMatchCase,
-      searchRegularExp: params.searchRegularExp,
+      searchRegularExp: params.searchRegularExp
     };
 
     const result = await parseGitHubZip(
@@ -1584,23 +1592,25 @@ export async function handleRepoEndpoint(
       owner,
       repo,
       branch,
-      options,
+      options
     );
 
     // Build and return response
-    return addCorsHeaders(buildSuccessResponse(
-      responseFormat,
-      result,
-      params,
-      url,
-      owner,
-      repo,
-      branch,
-      path,
-      repoAccess,
-      modalContext,
-      branch || repoAccess.default_branch,
-    ));
+    return addCorsHeaders(
+      buildSuccessResponse(
+        responseFormat,
+        result,
+        params,
+        url,
+        owner,
+        repo,
+        branch,
+        path,
+        repoAccess,
+        modalContext,
+        branch || repoAccess.default_branch
+      )
+    );
   } catch (e: any) {
     return addCorsHeaders(new Response(`Error: ${e.message}`, { status: 500 }));
   }

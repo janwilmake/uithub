@@ -42,11 +42,11 @@ async function fetchIssues(
   repo: string,
   page: number,
   query: string | null,
-  token: string | null,
+  token: string | null
 ): Promise<ThreadsResponse> {
   const headers: HeadersInit = {
     Accept: "application/vnd.github.v3+json",
-    "User-Agent": "uithub",
+    "User-Agent": "uithub"
   };
   if (token) headers["Authorization"] = `token ${token}`;
 
@@ -55,12 +55,12 @@ async function fetchIssues(
     per_page: "30",
     state: "all",
     sort: "updated",
-    direction: "desc",
+    direction: "desc"
   });
 
   const response = await fetch(
     `https://api.github.com/repos/${owner}/${repo}/issues?${params}`,
-    { headers },
+    { headers }
   );
 
   if (!response.ok) {
@@ -83,7 +83,7 @@ async function fetchIssues(
       author: {
         login: item.user.login,
         avatarUrl: item.user.avatar_url,
-        url: item.user.html_url,
+        url: item.user.html_url
       },
       createdAt: item.created_at,
       updatedAt: item.updated_at,
@@ -92,8 +92,8 @@ async function fetchIssues(
       type: "issues" as ThreadType,
       labels: item.labels.map((l: any) => l.name),
       reactions: {
-        totalCount: item.reactions?.total_count || 0,
-      },
+        totalCount: item.reactions?.total_count || 0
+      }
     }));
 
   const linkHeader = response.headers.get("Link");
@@ -103,7 +103,7 @@ async function fetchIssues(
     items,
     totalCount: items.length,
     page,
-    hasNextPage,
+    hasNextPage
   };
 }
 
@@ -112,11 +112,11 @@ async function fetchPulls(
   repo: string,
   page: number,
   query: string | null,
-  token: string | null,
+  token: string | null
 ): Promise<ThreadsResponse> {
   const headers: HeadersInit = {
     Accept: "application/vnd.github.v3+json",
-    "User-Agent": "uithub",
+    "User-Agent": "uithub"
   };
   if (token) headers["Authorization"] = `token ${token}`;
 
@@ -125,12 +125,12 @@ async function fetchPulls(
     per_page: "30",
     state: "all",
     sort: "updated",
-    direction: "desc",
+    direction: "desc"
   });
 
   const response = await fetch(
     `https://api.github.com/repos/${owner}/${repo}/pulls?${params}`,
-    { headers },
+    { headers }
   );
 
   if (!response.ok) {
@@ -152,7 +152,7 @@ async function fetchPulls(
       author: {
         login: item.user.login,
         avatarUrl: item.user.avatar_url,
-        url: item.user.html_url,
+        url: item.user.html_url
       },
       createdAt: item.created_at,
       updatedAt: item.updated_at,
@@ -161,8 +161,8 @@ async function fetchPulls(
       type: "pulls" as ThreadType,
       labels: item.labels.map((l: any) => l.name),
       reactions: {
-        totalCount: 0,
-      },
+        totalCount: 0
+      }
     }));
 
   const linkHeader = response.headers.get("Link");
@@ -172,7 +172,7 @@ async function fetchPulls(
     items,
     totalCount: items.length,
     page,
-    hasNextPage,
+    hasNextPage
   };
 }
 
@@ -181,11 +181,11 @@ async function fetchDiscussions(
   repo: string,
   page: number,
   query: string | null,
-  token: string | null,
+  token: string | null
 ): Promise<ThreadsResponse> {
   const headers: HeadersInit = {
     Accept: "application/vnd.github.v3+json",
-    "User-Agent": "uithub",
+    "User-Agent": "uithub"
   };
   if (token) headers["Authorization"] = `token ${token}`;
 
@@ -229,16 +229,16 @@ async function fetchDiscussions(
     method: "POST",
     headers: {
       ...headers,
-      "Content-Type": "application/json",
+      "Content-Type": "application/json"
     },
     body: JSON.stringify({
       query: graphqlQuery,
       variables: {
         owner,
         repo,
-        cursor: page > 1 ? btoa(`cursor:${(page - 1) * 30}`) : null,
-      },
-    }),
+        cursor: page > 1 ? btoa(`cursor:${(page - 1) * 30}`) : null
+      }
+    })
   });
 
   if (!response.ok) {
@@ -263,7 +263,7 @@ async function fetchDiscussions(
       author: {
         login: item.author?.login || "unknown",
         avatarUrl: item.author?.avatarUrl || "",
-        url: item.author?.url || "",
+        url: item.author?.url || ""
       },
       createdAt: item.createdAt,
       updatedAt: item.updatedAt,
@@ -272,15 +272,15 @@ async function fetchDiscussions(
       type: "discussions" as ThreadType,
       labels: item.labels?.nodes?.map((l: any) => l.name) || [],
       reactions: {
-        totalCount: item.reactions?.totalCount || 0,
-      },
+        totalCount: item.reactions?.totalCount || 0
+      }
     }));
 
   return {
     items,
     totalCount: items.length,
     page,
-    hasNextPage: pageInfo.hasNextPage || false,
+    hasNextPage: pageInfo.hasNextPage || false
   };
 }
 
@@ -291,20 +291,20 @@ function generateThreadsHTML(
   repo: string,
   threadType: ThreadType,
   response: ThreadsResponse,
-  query: string | null,
+  query: string | null
 ): string {
   const typeLabel =
     threadType === "issues"
       ? "Issues"
       : threadType === "pulls"
-      ? "Pull Requests"
-      : "Discussions";
+        ? "Pull Requests"
+        : "Discussions";
 
   const markdownContent = generateThreadsMarkdown(
     owner,
     repo,
     threadType,
-    response,
+    response
   );
 
   return `<!DOCTYPE html>
@@ -538,20 +538,20 @@ function generateThreadsHTML(
     <div class="controls">
       <div class="nav-tabs">
         <a href="/${owner}/${repo}/issues${
-    query ? `?q=${encodeURIComponent(query)}` : ""
-  }" 
+          query ? `?q=${encodeURIComponent(query)}` : ""
+        }" 
            class="nav-tab ${threadType === "issues" ? "active" : ""}">
           Issues
         </a>
         <a href="/${owner}/${repo}/pulls${
-    query ? `?q=${encodeURIComponent(query)}` : ""
-  }" 
+          query ? `?q=${encodeURIComponent(query)}` : ""
+        }" 
            class="nav-tab ${threadType === "pulls" ? "active" : ""}">
           Pull Requests
         </a>
         <a href="/${owner}/${repo}/discussions${
-    query ? `?q=${encodeURIComponent(query)}` : ""
-  }" 
+          query ? `?q=${encodeURIComponent(query)}` : ""
+        }" 
            class="nav-tab ${threadType === "discussions" ? "active" : ""}">
           Discussions
         </a>
@@ -588,8 +588,8 @@ function generateThreadsHTML(
         .map(
           (item) => `
         <a href="/${owner}/${repo}/${threadType}/${
-            item.number
-          }" class="thread-item">
+          item.number
+        }" class="thread-item">
           <div class="thread-header">
             <span class="thread-number">#${item.number}</span>
             <span class="thread-state ${
@@ -614,7 +614,7 @@ function generateThreadsHTML(
             <div class="labels">
               ${item.labels
                 .map(
-                  (label) => `<span class="label">${escapeHtml(label)}</span>`,
+                  (label) => `<span class="label">${escapeHtml(label)}</span>`
                 )
                 .join("")}
             </div>
@@ -622,7 +622,7 @@ function generateThreadsHTML(
               : ""
           }
         </a>
-      `,
+      `
         )
         .join("")}
     </div>
@@ -683,14 +683,14 @@ function generateThreadsMarkdown(
   owner: string,
   repo: string,
   threadType: ThreadType,
-  response: ThreadsResponse,
+  response: ThreadsResponse
 ): string {
   const typeLabel =
     threadType === "issues"
       ? "Issues"
       : threadType === "pulls"
-      ? "Pull Requests"
-      : "Discussions";
+        ? "Pull Requests"
+        : "Discussions";
 
   return `# ${owner}/${repo} - ${typeLabel}
 
@@ -713,7 +713,7 @@ ${
 ${item.body}
 
 ---
-`,
+`
   )
   .join("\n")}
 
@@ -724,7 +724,7 @@ Page ${response.page}${response.hasNextPage ? " (more available)" : ""}`;
 
 export async function handleThreads(
   request: Request,
-  env: Env,
+  env: Env
 ): Promise<Response> {
   const url = new URL(request.url);
   const [_, owner, repo, threadType] = url.pathname.split("/");
@@ -741,11 +741,11 @@ export async function handleThreads(
       const loginUrl = `${
         url.origin
       }/login?scope=user:email&redirect_to=${encodeURIComponent(
-        url.pathname + url.search,
+        url.pathname + url.search
       )}`;
       return Response.redirect(loginUrl, 302);
     }
-    return createUnauthorizedResponse(url, "read");
+    return createUnauthorizedResponse(url);
   }
 
   const page = parseInt(url.searchParams.get("page") || "1", 10);
@@ -761,7 +761,7 @@ export async function handleThreads(
           repo,
           page,
           query,
-          githubAccessToken,
+          githubAccessToken
         );
         break;
       case "pulls":
@@ -770,7 +770,7 @@ export async function handleThreads(
           repo,
           page,
           query,
-          githubAccessToken,
+          githubAccessToken
         );
         break;
       case "discussions":
@@ -779,7 +779,7 @@ export async function handleThreads(
           repo,
           page,
           query,
-          githubAccessToken,
+          githubAccessToken
         );
         break;
       default:
@@ -794,13 +794,13 @@ export async function handleThreads(
       acceptHeader.includes("application/json")
     ) {
       return new Response(JSON.stringify(response, null, 2), {
-        headers: { "Content-Type": "application/json" },
+        headers: { "Content-Type": "application/json" }
       });
     }
 
     if (acceptParam === "text/yaml" || acceptHeader.includes("text/yaml")) {
       return new Response(stringify(response), {
-        headers: { "Content-Type": "text/yaml" },
+        headers: { "Content-Type": "text/yaml" }
       });
     }
 
@@ -817,11 +817,11 @@ export async function handleThreads(
           owner,
           repo,
           threadType as ThreadType,
-          response,
+          response
         ),
         {
-          headers: { "Content-Type": "text/markdown; charset=utf-8" },
-        },
+          headers: { "Content-Type": "text/markdown; charset=utf-8" }
+        }
       );
     }
 
@@ -831,16 +831,16 @@ export async function handleThreads(
         repo,
         threadType as ThreadType,
         response,
-        query,
+        query
       ),
       {
         headers: {
           "Content-Type": "text/html",
           "X-XSS-Protection": "1; mode=block",
           "X-Content-Type-Options": "nosniff",
-          "X-Frame-Options": "DENY",
-        },
-      },
+          "X-Frame-Options": "DENY"
+        }
+      }
     );
   } catch (e: any) {
     return new Response(`Error: ${e.message}`, { status: 500 });

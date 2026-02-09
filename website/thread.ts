@@ -3,7 +3,7 @@ import { stringify } from "yaml";
 import {
   parseZipStreaming,
   type StreamingParseContext,
-  type ContentType,
+  type ContentType
 } from "../lib/src";
 
 // ==================== TYPES ====================
@@ -50,11 +50,11 @@ async function fetchAllComments(
   owner: string,
   repo: string,
   number: string,
-  token: string | null,
+  token: string | null
 ): Promise<Comment[]> {
   const headers: HeadersInit = {
     Accept: "application/vnd.github.v3+json",
-    "User-Agent": "uithub",
+    "User-Agent": "uithub"
   };
   if (token) headers["Authorization"] = `token ${token}`;
 
@@ -65,7 +65,7 @@ async function fetchAllComments(
   while (hasMore) {
     const response = await fetch(
       `https://api.github.com/repos/${owner}/${repo}/issues/${number}/comments?page=${page}&per_page=100`,
-      { headers },
+      { headers }
     );
 
     if (!response.ok) {
@@ -84,12 +84,12 @@ async function fetchAllComments(
           author: {
             login: c.user.login,
             avatarUrl: c.user.avatar_url,
-            url: c.user.html_url,
+            url: c.user.html_url
           },
           createdAt: c.created_at,
           updatedAt: c.updated_at,
-          url: c.html_url,
-        })),
+          url: c.html_url
+        }))
       );
       page++;
     }
@@ -107,17 +107,17 @@ async function fetchIssue(
   owner: string,
   repo: string,
   number: string,
-  token: string | null,
+  token: string | null
 ): Promise<ThreadDetail> {
   const headers: HeadersInit = {
     Accept: "application/vnd.github.v3+json",
-    "User-Agent": "uithub",
+    "User-Agent": "uithub"
   };
   if (token) headers["Authorization"] = `token ${token}`;
 
   const issueResponse = await fetch(
     `https://api.github.com/repos/${owner}/${repo}/issues/${number}`,
-    { headers },
+    { headers }
   );
 
   if (!issueResponse.ok) {
@@ -135,7 +135,7 @@ async function fetchIssue(
     author: {
       login: issue.user.login,
       avatarUrl: issue.user.avatar_url,
-      url: issue.user.html_url,
+      url: issue.user.html_url
     },
     createdAt: issue.created_at,
     updatedAt: issue.updated_at,
@@ -145,9 +145,9 @@ async function fetchIssue(
     labels: issue.labels.map((l: any) => l.name),
     reactions: {
       totalCount: issue.reactions?.total_count || 0,
-      types: [],
+      types: []
     },
-    comments,
+    comments
   };
 }
 
@@ -155,11 +155,11 @@ async function fetchAllDiscussionComments(
   owner: string,
   repo: string,
   discussionId: string,
-  token: string | null,
+  token: string | null
 ): Promise<Comment[]> {
   const headers: HeadersInit = {
     Accept: "application/vnd.github.v3+json",
-    "User-Agent": "uithub",
+    "User-Agent": "uithub"
   };
   if (token) headers["Authorization"] = `token ${token}`;
 
@@ -199,12 +199,12 @@ async function fetchAllDiscussionComments(
       method: "POST",
       headers: {
         ...headers,
-        "Content-Type": "application/json",
+        "Content-Type": "application/json"
       },
       body: JSON.stringify({
         query: graphqlQuery,
-        variables: { owner, repo, discussionId, cursor },
-      }),
+        variables: { owner, repo, discussionId, cursor }
+      })
     });
 
     if (!response.ok) {
@@ -225,12 +225,12 @@ async function fetchAllDiscussionComments(
         author: {
           login: c.author?.login || "unknown",
           avatarUrl: c.author?.avatarUrl || "",
-          url: c.author?.url || "",
+          url: c.author?.url || ""
         },
         createdAt: c.createdAt,
         updatedAt: c.updatedAt,
-        url: c.url,
-      })),
+        url: c.url
+      }))
     );
 
     hasNextPage = comments.pageInfo.hasNextPage;
@@ -244,11 +244,11 @@ async function fetchDiscussion(
   owner: string,
   repo: string,
   number: string,
-  token: string | null,
+  token: string | null
 ): Promise<ThreadDetail> {
   const headers: HeadersInit = {
     Accept: "application/vnd.github.v3+json",
-    "User-Agent": "uithub",
+    "User-Agent": "uithub"
   };
   if (token) headers["Authorization"] = `token ${token}`;
 
@@ -286,16 +286,16 @@ async function fetchDiscussion(
     method: "POST",
     headers: {
       ...headers,
-      "Content-Type": "application/json",
+      "Content-Type": "application/json"
     },
     body: JSON.stringify({
       query: graphqlQuery,
       variables: {
         owner,
         repo,
-        number: parseInt(number, 10),
-      },
-    }),
+        number: parseInt(number, 10)
+      }
+    })
   });
 
   if (!response.ok) {
@@ -313,7 +313,7 @@ async function fetchDiscussion(
     owner,
     repo,
     discussion.id,
-    token,
+    token
   );
 
   return {
@@ -324,7 +324,7 @@ async function fetchDiscussion(
     author: {
       login: discussion.author?.login || "unknown",
       avatarUrl: discussion.author?.avatarUrl || "",
-      url: discussion.author?.url || "",
+      url: discussion.author?.url || ""
     },
     createdAt: discussion.createdAt,
     updatedAt: discussion.updatedAt,
@@ -334,9 +334,9 @@ async function fetchDiscussion(
     labels: discussion.labels?.nodes?.map((l: any) => l.name) || [],
     reactions: {
       totalCount: discussion.reactions?.totalCount || 0,
-      types: [],
+      types: []
     },
-    comments,
+    comments
   };
 }
 
@@ -354,10 +354,10 @@ async function fetchRelevantContents(
     excludeExt?: string[];
     disableGenignore: boolean;
     maxFileSize?: number;
-  },
+  }
 ): Promise<{ [path: string]: ContentType } | null> {
   const allText = [thread.body, ...thread.comments.map((c) => c.body)].join(
-    "\n",
+    "\n"
   );
 
   const filePathRegex = /`([^`]+\.[a-zA-Z]+)`/g;
@@ -377,13 +377,13 @@ async function fetchRelevantContents(
 
   const headers: HeadersInit = {
     Accept: "application/vnd.github.v3+json",
-    "User-Agent": "uithub",
+    "User-Agent": "uithub"
   };
   if (token) headers["Authorization"] = `token ${token}`;
 
   const response = await fetch(
     `https://github.com/${owner}/${repo}/archive/HEAD.zip`,
-    { headers },
+    { headers }
   );
 
   if (!response.ok || !response.body) {
@@ -399,7 +399,7 @@ async function fetchRelevantContents(
     disableGenignore: params.disableGenignore,
     maxFileSize: params.maxFileSize,
     maxTokens: params.maxTokens,
-    shouldAddLineNumbers: params.shouldAddLineNumbers,
+    shouldAddLineNumbers: params.shouldAddLineNumbers
   };
 
   const result = await parseZipStreaming(response.body, parseContext);
@@ -412,14 +412,14 @@ function generateThreadHTML(
   owner: string,
   repo: string,
   thread: ThreadDetail,
-  relevantContents: { [path: string]: ContentType } | null,
+  relevantContents: { [path: string]: ContentType } | null
 ): string {
   const typeLabel = thread.type === "issues" ? "Issue" : "Discussion";
   const markdownContent = generateThreadMarkdown(
     owner,
     repo,
     thread,
-    relevantContents,
+    relevantContents
   );
 
   return `<!DOCTYPE html>
@@ -633,7 +633,7 @@ function generateThreadHTML(
         <div>
           <div class="author-name">@${thread.author.login}</div>
           <div class="timestamp">${new Date(
-            thread.createdAt,
+            thread.createdAt
           ).toLocaleString()}</div>
         </div>
       </div>
@@ -660,13 +660,13 @@ function generateThreadHTML(
               <div>
                 <div class="author-name">@${comment.author.login}</div>
                 <div class="timestamp">${new Date(
-                  comment.createdAt,
+                  comment.createdAt
                 ).toLocaleString()}</div>
               </div>
             </div>
             <div class="body">${escapeHtml(comment.body)}</div>
           </div>
-        `,
+        `
           )
           .join("")}
       </div>
@@ -687,10 +687,10 @@ function generateThreadHTML(
             <pre>${escapeHtml(
               content.type === "content"
                 ? content.content || ""
-                : `Binary file: ${content.url}`,
+                : `Binary file: ${content.url}`
             )}</pre>
           </div>
-        `,
+        `
           )
           .join("")}
       </div>
@@ -733,7 +733,7 @@ function generateThreadMarkdown(
   owner: string,
   repo: string,
   thread: ThreadDetail,
-  relevantContents: { [path: string]: ContentType } | null,
+  relevantContents: { [path: string]: ContentType } | null
 ): string {
   const typeLabel = thread.type === "issues" ? "Issue" : "Discussion";
 
@@ -773,7 +773,7 @@ ${thread.comments
 ${comment.body}
 
 ---
-`,
+`
   )
   .join("\n")}
 `
@@ -795,7 +795,7 @@ ${Object.entries(relevantContents)
 \`\`\`
 ${content.type === "content" ? content.content : `Binary file: ${content.url}`}
 \`\`\`
-`,
+`
   )
   .join("\n")}
 `
@@ -807,7 +807,7 @@ ${content.type === "content" ? content.content : `Binary file: ${content.url}`}
 
 export async function handleThread(
   request: Request,
-  env: Env,
+  env: Env
 ): Promise<Response> {
   const url = new URL(request.url);
   const [_, owner, repo, threadType, number] = url.pathname.split("/");
@@ -824,11 +824,11 @@ export async function handleThread(
       const loginUrl = `${
         url.origin
       }/login?scope=user:email&redirect_to=${encodeURIComponent(
-        url.pathname + url.search,
+        url.pathname + url.search
       )}`;
       return Response.redirect(loginUrl, 302);
     }
-    return createUnauthorizedResponse(url, "read");
+    return createUnauthorizedResponse(url);
   }
 
   try {
@@ -842,7 +842,7 @@ export async function handleThread(
 
     const maxTokens = parseInt(
       url.searchParams.get("maxTokens") || "50000",
-      10,
+      10
     );
     const shouldAddLineNumbers = url.searchParams.get("lines") !== "false";
     const includeExt = url.searchParams.get("ext")?.split(",");
@@ -863,8 +863,8 @@ export async function handleThread(
         includeExt,
         excludeExt,
         disableGenignore,
-        maxFileSize,
-      },
+        maxFileSize
+      }
     );
 
     const acceptParam = url.searchParams.get("accept");
@@ -877,14 +877,14 @@ export async function handleThread(
       return new Response(
         JSON.stringify({ thread, relevantContents }, null, 2),
         {
-          headers: { "Content-Type": "application/json" },
-        },
+          headers: { "Content-Type": "application/json" }
+        }
       );
     }
 
     if (acceptParam === "text/yaml" || acceptHeader.includes("text/yaml")) {
       return new Response(stringify({ thread, relevantContents }), {
-        headers: { "Content-Type": "text/yaml" },
+        headers: { "Content-Type": "text/yaml" }
       });
     }
 
@@ -899,8 +899,8 @@ export async function handleThread(
       return new Response(
         generateThreadMarkdown(owner, repo, thread, relevantContents),
         {
-          headers: { "Content-Type": "text/markdown; charset=utf-8" },
-        },
+          headers: { "Content-Type": "text/markdown; charset=utf-8" }
+        }
       );
     }
 
@@ -911,9 +911,9 @@ export async function handleThread(
           "Content-Type": "text/html",
           "X-XSS-Protection": "1; mode=block",
           "X-Content-Type-Options": "nosniff",
-          "X-Frame-Options": "DENY",
-        },
-      },
+          "X-Frame-Options": "DENY"
+        }
+      }
     );
   } catch (e: any) {
     return new Response(`Error: ${e.message}`, { status: 500 });
