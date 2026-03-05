@@ -606,6 +606,31 @@ function generateViewHTML(context: {
       z-index: 1000;
       ${contentBlurStyle}
     }
+    .site-footer {
+      position: fixed;
+      bottom: 0;
+      left: 0;
+      right: 0;
+      z-index: 1000;
+      background-color: var(--header-bg);
+      border-top: 1px solid var(--header-border);
+      padding: 8px 16px;
+      display: flex;
+      justify-content: flex-end;
+      align-items: center;
+    }
+    .site-footer a {
+      color: var(--text-color);
+      text-decoration: none;
+      padding: 6px 14px;
+      border: 1px solid var(--button-border);
+      border-radius: 4px;
+      background-color: var(--button-bg);
+      font-size: 13px;
+    }
+    .site-footer a:hover {
+      border-color: var(--text-color);
+    }
     .header-main {
       display: flex;
       flex-wrap: wrap;
@@ -1041,6 +1066,10 @@ function generateViewHTML(context: {
       if (header) {
         document.body.style.paddingTop = header.offsetHeight + 'px';
       }
+      const footer = document.querySelector('.site-footer');
+      if (footer) {
+        document.body.style.paddingBottom = footer.offsetHeight + 'px';
+      }
     }
 
     function updateFilters() {
@@ -1251,6 +1280,15 @@ function generateViewHTML(context: {
       // Update padding on resize
       window.addEventListener('resize', updateBodyPadding);
     };
+  </script>
+  <footer class="site-footer">
+    <a id="badgeLink" href="#" target="_blank">Create README Badge</a>
+  </footer>
+  <script>
+    (function() {
+      var link = document.getElementById('badgeLink');
+      link.href = 'https://badge.forgithub.com/?link=' + encodeURIComponent(window.location.href);
+    })();
   </script>
   <!-- 100% privacy-first analytics -->
 <script async src="https://scripts.simpleanalyticscdn.com/latest.js"></script>

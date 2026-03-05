@@ -1,30 +1,129 @@
-Ok so it's been a while! today i wanna bring back some version of uithub that doesn't accept bot traffic without api key
+# uithub
 
-Older uithub-related code:
+Turn any GitHub repository into LLM-ready context. Just replace `github.com` with `uithub.com` in any URL.
 
-- https://github.com/janwilmake?tab=repositories&q=uithub
-- https://github.com/janwilmake/uithub.llms
-- https://github.com/janwilmake/uit
-- https://github.com/janwilmake/uithub-mcp
+```
+https://github.com/facebook/react  →  https://uithub.com/facebook/react
+```
 
-Requirements
+uithub streams the repository ZIP, parses it on the fly, and returns a token-counted, tree-structured view of the codebase — ready to paste into ChatGPT, Claude, or any other LLM.
 
-- ✅ Should have all features the old uithub had
-- ✅ Should be free and accessible but if no API key is provided, show an unclosable popup to sign w/ github first, without private repo access
-- ✅ Should stream zip contents to the result page but using Cloudflare
-- ✅ Should follow MCP standard for oauth such that any client can get an API key that hides the original github key
+## Features
 
-## File Overview
+- **Streaming ZIP parsing** — fetches and parses repos on the edge via Cloudflare Workers, no full download needed
+- **Token-aware output** — files sorted by size, included until a configurable token budget is reached
+- **File filtering** — by extension, directory, path, or VS Code-style glob patterns
+- **Content search** — find files by content with plain text, case-sensitive, or regex matching
+- **`.genignore` support** — like `.gitignore`, but for controlling what AI tools see
+- **Multiple output formats** — HTML (default), JSON, YAML, Markdown
+- **Issues, PRs, and discussions** — view threads and comments, not just code
+- **OAuth + API keys** — free for public repos (GitHub login required), API keys for programmatic access
+- **MCP-compatible OAuth** — any MCP client can authenticate and get an API key
+
+## Quick Start
+
+### In the browser
+
+Visit `https://uithub.com/{owner}/{repo}` for any public GitHub repo.
+
+### With the CLI
+
+```bash
+npm install -g uithub
+uithub facebook/react
+uithub facebook/react?ext=ts,js&maxTokens=30000
+uithub nodejs/node/issues/12345
+```
+
+### As a library
+
+```bash
+npm install uithub-lib
+```
+
+```typescript
+import { parseGitHubZip } from "uithub-lib";
+
+const response = await fetch(
+  "https://github.com/owner/repo/archive/refs/heads/main.zip",
+);
+
+const result = await parseGitHubZip(response.body, "owner", "repo", "main", {
+  maxTokens: 50000,
+});
+
+console.log(result.fileString); // Formatted content ready for LLMs
+console.log(result.totalTokens); // Total token count
+```
+
+### As a Claude Code skill
+
+The `skills/uithub-fetcher` directory contains a skill that automatically fetches repo contents when you paste a GitHub URL into Claude Code.
+
+## Query Parameters
+
+| Parameter         | Description                          | Example                         |
+| ----------------- | ------------------------------------ | ------------------------------- |
+| `maxTokens`       | Token budget (default: 50,000)       | `maxTokens=30000`              |
+| `ext`             | Include file extensions              | `ext=ts,js,md`                 |
+| `exclude-ext`     | Exclude file extensions              | `exclude-ext=test.ts`          |
+| `dir`             | Include directories                  | `dir=src,lib`                  |
+| `exclude-dir`     | Exclude directories                  | `exclude-dir=node_modules`     |
+| `include`         | Glob patterns to include             | `include=src/**/*.ts`          |
+| `exclude`         | Glob patterns to exclude             | `exclude=**/*.test.ts`         |
+| `search`          | Search file contents                 | `search=useState`              |
+| `searchMatchCase` | Case-sensitive search                | `searchMatchCase=true`         |
+| `searchRegularExp`| Regex search                         | `searchRegularExp=true`        |
+| `maxFileSize`     | Max file size in bytes               | `maxFileSize=100000`           |
+| `accept`          | Response format                      | `accept=application/json`      |
+| `omitFiles`       | Only return the tree, no contents    | `omitFiles=true`               |
+| `omitTree`        | Omit directory tree                  | `omitTree=true`                |
+| `lines`           | Show line numbers (default: true)    | `lines=false`                  |
+| `disableGenignore`| Disable .genignore processing        | `disableGenignore=true`        |
+
+## Project Structure
+
+This is a monorepo with three packages:
+
+| Package    | Description                                                       |
+| ---------- | ----------------------------------------------------------------- |
+| `website/` | Cloudflare Worker — the main uithub.com site and API              |
+| `lib/`     | `uithub-lib` — standalone ZIP parsing and formatting library      |
+| `cli/`     | `uithub` CLI — command-line client for fetching repo contents     |
+| `skills/`  | Claude Code skill for automatic GitHub URL fetching               |
+
+### Website modules
 
 | File               | Description                                                     |
 | ------------------ | --------------------------------------------------------------- |
-| `src/index.ts`     | Main router - dispatches requests to handlers based on URL      |
-| `src/auth.ts`      | OAuth 2.0 server, GitHub login, session/token management        |
-| `src/repo.ts`      | Fetches repos, streams ZIP, renders content (HTML/JSON/YAML/MD) |
-| `src/owner.ts`     | User profile page - lists repositories                          |
-| `src/parse-zip.ts` | Streaming ZIP parser with `.genignore` and token filtering      |
-| `src/threads.ts`   | Lists issues, PRs, discussions for a repo                       |
-| `src/thread.ts`    | Single issue/discussion view with comments                      |
-| `src/dashboard.ts` | User dashboard - API keys, OAuth clients, balance               |
-| `src/analytics.ts` | Request tracking via Durable Objects + admin dashboard          |
-| `src/stripe.ts`    | Stripe webhook - processes payments, adds credit                |
+| `website/index.ts` | Main router — dispatches requests to handlers based on URL      |
+| `website/auth.ts`  | OAuth 2.0 server, GitHub login, session/token management        |
+| `website/repo.ts`  | Fetches repos, streams ZIP, renders content (HTML/JSON/YAML/MD) |
+| `website/owner.ts` | User profile page — lists repositories                          |
+| `website/threads.ts` | Lists issues, PRs, discussions for a repo                     |
+| `website/thread.ts`  | Single issue/discussion view with comments                    |
+| `website/dashboard.ts` | User dashboard — API keys, OAuth clients, balance           |
+| `website/analytics.ts` | Request tracking via Durable Objects + admin dashboard       |
+| `website/stripe.ts`    | Stripe webhook — processes payments, adds credit             |
+
+## How It Works
+
+1. You visit `uithub.com/{owner}/{repo}`
+2. uithub fetches the repo ZIP from GitHub's archive API
+3. The ZIP is streamed and parsed on the edge (Cloudflare Workers) — no full download
+4. Files are filtered by `.genignore`, your query parameters, and token budget
+5. The result is returned as a formatted, token-counted view with a directory tree
+
+## API
+
+uithub exposes an OpenAPI-documented REST API. See the full spec at:
+
+```
+https://uithub.com/openapi.json
+```
+
+Authenticate with a Bearer token obtained through the OAuth flow or the dashboard.
+
+## License
+
+MIT

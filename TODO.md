@@ -26,4 +26,4 @@ improve pricing? better converting page
 
 See https://github.com/janwilmake?tab=repositories&q=uithub. and https://github.com/janwilmake?tab=repositories&q=zipobject and https://github.com/janwilmake?tab=repositories&q=forgithub. and ensure I don't redo anything.
 
-push uithub badge more! see https://news.ycombinator.com/item?id=47181471
+🟠 push uithub badge more! see https://news.ycombinator.com/item?id=47181471
