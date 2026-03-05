@@ -1,7 +1,7 @@
 ---
 name: uithub-fetcher
 description: Fetch GitHub repository contents using uithub CLI when users paste GitHub URLs. Use when users share github.com links or need to analyze repository code, issues, or pull requests.
-compatibility: Requires Node.js >=18.0.0 and the uithub CLI tool
+compatibility: Requires Node.js >=18.0.0 (uses npx uithub-cli)
 ---
 
 # GitHub Content Fetcher via uithub
@@ -16,15 +16,7 @@ Activate this skill whenever:
 
 ## Prerequisites
 
-The uithub CLI must be installed. Check with:
-```bash
-which uithub || command -v uithub
-```
-
-If not installed, guide the user to install it:
-```bash
-npm install -g /path/to/uithub-cli
-```
+Requires Node.js >=18.0.0. No global installation needed — all commands use `npx uithub-cli` which downloads and caches the package automatically.
 
 ## How to fetch repository contents
 
@@ -33,7 +25,7 @@ npm install -g /path/to/uithub-cli
 When a user pastes a GitHub URL like `https://github.com/owner/repo`:
 
 ```bash
-uithub owner/repo
+npx uithub-cli "owner/repo"
 ```
 
 This returns the full repository structure with file contents.
@@ -43,7 +35,7 @@ This returns the full repository structure with file contents.
 For specific file types (TypeScript, JavaScript, Python, etc.):
 
 ```bash
-uithub owner/repo?ext=ts,js,py
+npx uithub-cli "owner/repo?ext=ts,js,py"
 ```
 
 ### Limiting response size
@@ -51,65 +43,65 @@ uithub owner/repo?ext=ts,js,py
 To avoid overwhelming context with large repositories:
 
 ```bash
-uithub owner/repo?maxTokens=50000
+npx uithub-cli "owner/repo?maxTokens=50000"
 ```
 
 ### Fetching specific issues or PRs
 
 For GitHub issues:
 ```bash
-uithub owner/repo/issues/123
+npx uithub-cli "owner/repo/issues/123"
 ```
 
 For pull requests:
 ```bash
-uithub owner/repo/pull/456
+npx uithub-cli "owner/repo/pull/456"
 ```
 
 ### Searching within repository
 
 To find specific code patterns:
 ```bash
-uithub owner/repo?search=functionName
+npx uithub-cli "owner/repo?search=functionName"
 ```
 
 For case-sensitive regex search:
 ```bash
-uithub owner/repo?search=pattern&searchRegularExp=true&searchMatchCase=true
+npx uithub-cli "owner/repo?search=pattern&searchRegularExp=true&searchMatchCase=true"
 ```
 
 ### Directory filtering
 
 Include specific directories:
 ```bash
-uithub owner/repo?dir=src,lib
+npx uithub-cli "owner/repo?dir=src,lib"
 ```
 
 Exclude directories:
 ```bash
-uithub owner/repo?exclude-dir=tests,node_modules
+npx uithub-cli "owner/repo?exclude-dir=tests,node_modules"
 ```
 
 ### Response formats
 
 Get JSON output:
 ```bash
-uithub owner/repo?accept=application/json
+npx uithub-cli "owner/repo?accept=application/json"
 ```
 
 Get YAML:
 ```bash
-uithub owner/repo?accept=text/yaml
+npx uithub-cli "owner/repo?accept=text/yaml"
 ```
 
 Get HTML:
 ```bash
-uithub owner/repo?accept=text/html
+npx uithub-cli "owner/repo?accept=text/html"
 ```
 
 ## Authentication flow
 
-On first use, uithub will:
+On first use, the CLI will:
 1. Open a browser for GitHub OAuth authentication
 2. Store the access token locally in `~/.uithub/token.json`
 3. Automatically use the token for subsequent requests
@@ -118,7 +110,7 @@ The token expires after a set period and will automatically re-authenticate when
 
 To manually logout:
 ```bash
-uithub logout
+npx uithub-cli logout
 ```
 
 ## Common usage patterns
@@ -132,7 +124,7 @@ uithub logout
 2. Assess repository size - React is large, so limit tokens
 3. Fetch with constraints:
    ```bash
-   uithub facebook/react?ext=js,ts&maxTokens=30000&dir=packages/react/src
+   npx uithub-cli "facebook/react?ext=js,ts&maxTokens=30000&dir=packages/react/src"
    ```
 
 ### Pattern 2: User wants to understand a specific issue
@@ -143,7 +135,7 @@ uithub logout
 1. Parse issue URL
 2. Fetch issue content:
    ```bash
-   uithub nodejs/node/issues/12345
+   npx uithub-cli "nodejs/node/issues/12345"
    ```
 
 ### Pattern 3: User needs code examples
@@ -153,7 +145,7 @@ uithub logout
 **Steps**:
 1. Search for authentication-related code:
    ```bash
-   uithub expressjs/express?search=auth&ext=js&dir=lib
+   npx uithub-cli "expressjs/express?search=auth&ext=js&dir=lib"
    ```
 
 ### Pattern 4: Large repository with specific focus
@@ -163,7 +155,7 @@ uithub logout
 **Steps**:
 1. Filter for TypeScript definition files only:
    ```bash
-   uithub microsoft/TypeScript?ext=d.ts&maxTokens=40000
+   npx uithub-cli "microsoft/TypeScript?ext=d.ts&maxTokens=40000"
    ```
 
 ## Query parameters reference

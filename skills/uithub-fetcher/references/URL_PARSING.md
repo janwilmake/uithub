@@ -14,7 +14,7 @@ owner/repo
 ```
 
 **Extract**: `owner`, `repo`
-**Command**: `uithub owner/repo[?params]`
+**Command**: `npx uithub-cli "owner/repo[?params]"`
 
 ### Branch/tree URLs
 
@@ -24,7 +24,7 @@ https://github.com/owner/repo/tree/main/src/components
 ```
 
 **Extract**: `owner`, `repo`, optional `path`
-**Command**: `uithub owner/repo?dir=src/components`
+**Command**: `npx uithub-cli "owner/repo?dir=src/components"`
 
 ### Issue URLs
 
@@ -34,7 +34,7 @@ github.com/owner/repo/issues/123
 ```
 
 **Extract**: `owner`, `repo`, `issue_number`
-**Command**: `uithub owner/repo/issues/123`
+**Command**: `npx uithub-cli "owner/repo/issues/123"`
 
 ### Pull request URLs
 
@@ -44,7 +44,7 @@ https://github.com/owner/repo/pull/456/files
 ```
 
 **Extract**: `owner`, `repo`, `pr_number`
-**Command**: `uithub owner/repo/pull/456`
+**Command**: `npx uithub-cli "owner/repo/pull/456"`
 
 ### File URLs
 
@@ -89,21 +89,21 @@ function parseGitHubURL(url) {
 
 ### Example 1: Basic repo URL
 Input: `https://github.com/facebook/react`
-Output: `uithub facebook/react`
+Output: `npx uithub-cli "facebook/react"`
 
 ### Example 2: Specific directory
 Input: `https://github.com/facebook/react/tree/main/packages/react`
-Output: `uithub facebook/react?dir=packages/react`
+Output: `npx uithub-cli "facebook/react?dir=packages/react"`
 
 ### Example 3: Issue
 Input: `https://github.com/nodejs/node/issues/12345`
-Output: `uithub nodejs/node/issues/12345`
+Output: `npx uithub-cli "nodejs/node/issues/12345"`
 
 ### Example 4: Pull request
 Input: `https://github.com/microsoft/TypeScript/pull/54321`
-Output: `uithub microsoft/TypeScript/pull/54321`
+Output: `npx uithub-cli microsoft/TypeScript/pull/54321`
 
 ### Example 5: Specific file
 Input: `https://github.com/vercel/next.js/blob/canary/packages/next/src/server/web/spec-extension/request.ts`
 Strategy: Fetch the directory or use search to find the file
-Output: `uithub vercel/next.js?include=**/request.ts&dir=packages/next/src/server/web/spec-extension`
+Output: `npx uithub-cli vercel/next.js?include=**/request.ts&dir=packages/next/src/server/web/spec-extension`
