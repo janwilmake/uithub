@@ -101,9 +101,9 @@ Output: `npx uithub-cli "nodejs/node/issues/12345"`
 
 ### Example 4: Pull request
 Input: `https://github.com/microsoft/TypeScript/pull/54321`
-Output: `npx uithub-cli microsoft/TypeScript/pull/54321`
+Output: `npx uithub-cli "microsoft/TypeScript/pull/54321"`
 
 ### Example 5: Specific file
 Input: `https://github.com/vercel/next.js/blob/canary/packages/next/src/server/web/spec-extension/request.ts`
 Strategy: Fetch the directory or use search to find the file
-Output: `npx uithub-cli vercel/next.js?include=**/request.ts&dir=packages/next/src/server/web/spec-extension`
+Output: `npx uithub-cli "vercel/next.js?include=**/request.ts&dir=packages/next/src/server/web/spec-extension"`
