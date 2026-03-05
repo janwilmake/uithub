@@ -26,6 +26,14 @@ uithub streams the repository ZIP, parses it on the fly, and returns a token-cou
 
 Visit `https://uithub.com/{owner}/{repo}` for any public GitHub repo.
 
+### As a Claude Code skill
+
+```bash
+npx skills add janwilmake/uithub
+```
+
+This installs a skill that automatically fetches repo contents when you paste a GitHub URL into Claude Code.
+
 ### With the CLI
 
 ```bash
@@ -55,10 +63,6 @@ const result = await parseGitHubZip(response.body, "owner", "repo", "main", {
 console.log(result.fileString); // Formatted content ready for LLMs
 console.log(result.totalTokens); // Total token count
 ```
-
-### As a Claude Code skill
-
-The `skills/uithub-fetcher` directory contains a skill that automatically fetches repo contents when you paste a GitHub URL into Claude Code.
 
 ## Query Parameters
 
