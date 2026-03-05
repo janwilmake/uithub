@@ -1,5 +1,7 @@
 # uithub
 
+[![Chat with Repo](https://badge.forgithub.com/janwilmake/uithub?badge=chat)](https://uithub.com/janwilmake/uithub)
+
 Turn any GitHub repository into LLM-ready context. Just replace `github.com` with `uithub.com` in any URL.
 
 ```
@@ -53,11 +55,11 @@ npm install uithub-lib
 import { parseGitHubZip } from "uithub-lib";
 
 const response = await fetch(
-  "https://github.com/owner/repo/archive/refs/heads/main.zip",
+  "https://github.com/owner/repo/archive/refs/heads/main.zip"
 );
 
 const result = await parseGitHubZip(response.body, "owner", "repo", "main", {
-  maxTokens: 50000,
+  maxTokens: 50000
 });
 
 console.log(result.fileString); // Formatted content ready for LLMs
@@ -66,49 +68,49 @@ console.log(result.totalTokens); // Total token count
 
 ## Query Parameters
 
-| Parameter         | Description                          | Example                         |
-| ----------------- | ------------------------------------ | ------------------------------- |
-| `maxTokens`       | Token budget (default: 50,000)       | `maxTokens=30000`              |
-| `ext`             | Include file extensions              | `ext=ts,js,md`                 |
-| `exclude-ext`     | Exclude file extensions              | `exclude-ext=test.ts`          |
-| `dir`             | Include directories                  | `dir=src,lib`                  |
-| `exclude-dir`     | Exclude directories                  | `exclude-dir=node_modules`     |
-| `include`         | Glob patterns to include             | `include=src/**/*.ts`          |
-| `exclude`         | Glob patterns to exclude             | `exclude=**/*.test.ts`         |
-| `search`          | Search file contents                 | `search=useState`              |
-| `searchMatchCase` | Case-sensitive search                | `searchMatchCase=true`         |
-| `searchRegularExp`| Regex search                         | `searchRegularExp=true`        |
-| `maxFileSize`     | Max file size in bytes               | `maxFileSize=100000`           |
-| `accept`          | Response format                      | `accept=application/json`      |
-| `omitFiles`       | Only return the tree, no contents    | `omitFiles=true`               |
-| `omitTree`        | Omit directory tree                  | `omitTree=true`                |
-| `lines`           | Show line numbers (default: true)    | `lines=false`                  |
-| `disableGenignore`| Disable .genignore processing        | `disableGenignore=true`        |
+| Parameter          | Description                       | Example                    |
+| ------------------ | --------------------------------- | -------------------------- |
+| `maxTokens`        | Token budget (default: 50,000)    | `maxTokens=30000`          |
+| `ext`              | Include file extensions           | `ext=ts,js,md`             |
+| `exclude-ext`      | Exclude file extensions           | `exclude-ext=test.ts`      |
+| `dir`              | Include directories               | `dir=src,lib`              |
+| `exclude-dir`      | Exclude directories               | `exclude-dir=node_modules` |
+| `include`          | Glob patterns to include          | `include=src/**/*.ts`      |
+| `exclude`          | Glob patterns to exclude          | `exclude=**/*.test.ts`     |
+| `search`           | Search file contents              | `search=useState`          |
+| `searchMatchCase`  | Case-sensitive search             | `searchMatchCase=true`     |
+| `searchRegularExp` | Regex search                      | `searchRegularExp=true`    |
+| `maxFileSize`      | Max file size in bytes            | `maxFileSize=100000`       |
+| `accept`           | Response format                   | `accept=application/json`  |
+| `omitFiles`        | Only return the tree, no contents | `omitFiles=true`           |
+| `omitTree`         | Omit directory tree               | `omitTree=true`            |
+| `lines`            | Show line numbers (default: true) | `lines=false`              |
+| `disableGenignore` | Disable .genignore processing     | `disableGenignore=true`    |
 
 ## Project Structure
 
 This is a monorepo with three packages:
 
-| Package    | Description                                                       |
-| ---------- | ----------------------------------------------------------------- |
-| `website/` | Cloudflare Worker — the main uithub.com site and API              |
-| `lib/`     | `uithub-lib` — standalone ZIP parsing and formatting library      |
-| `cli/`     | `uithub` CLI — command-line client for fetching repo contents     |
-| `skills/`  | Claude Code skill for automatic GitHub URL fetching               |
+| Package    | Description                                                   |
+| ---------- | ------------------------------------------------------------- |
+| `website/` | Cloudflare Worker — the main uithub.com site and API          |
+| `lib/`     | `uithub-lib` — standalone ZIP parsing and formatting library  |
+| `cli/`     | `uithub` CLI — command-line client for fetching repo contents |
+| `skills/`  | Claude Code skill for automatic GitHub URL fetching           |
 
 ### Website modules
 
-| File               | Description                                                     |
-| ------------------ | --------------------------------------------------------------- |
-| `website/index.ts` | Main router — dispatches requests to handlers based on URL      |
-| `website/auth.ts`  | OAuth 2.0 server, GitHub login, session/token management        |
-| `website/repo.ts`  | Fetches repos, streams ZIP, renders content (HTML/JSON/YAML/MD) |
-| `website/owner.ts` | User profile page — lists repositories                          |
-| `website/threads.ts` | Lists issues, PRs, discussions for a repo                     |
-| `website/thread.ts`  | Single issue/discussion view with comments                    |
-| `website/dashboard.ts` | User dashboard — API keys, OAuth clients, balance           |
-| `website/analytics.ts` | Request tracking via Durable Objects + admin dashboard       |
-| `website/stripe.ts`    | Stripe webhook — processes payments, adds credit             |
+| File                   | Description                                                     |
+| ---------------------- | --------------------------------------------------------------- |
+| `website/index.ts`     | Main router — dispatches requests to handlers based on URL      |
+| `website/auth.ts`      | OAuth 2.0 server, GitHub login, session/token management        |
+| `website/repo.ts`      | Fetches repos, streams ZIP, renders content (HTML/JSON/YAML/MD) |
+| `website/owner.ts`     | User profile page — lists repositories                          |
+| `website/threads.ts`   | Lists issues, PRs, discussions for a repo                       |
+| `website/thread.ts`    | Single issue/discussion view with comments                      |
+| `website/dashboard.ts` | User dashboard — API keys, OAuth clients, balance               |
+| `website/analytics.ts` | Request tracking via Durable Objects + admin dashboard          |
+| `website/stripe.ts`    | Stripe webhook — processes payments, adds credit                |
 
 ## How It Works
 
