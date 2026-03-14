@@ -46,6 +46,8 @@ interface AnalyticsStats {
   mau: number;
   dau_mau_ratio: number; // "stickiness" - healthy SaaS is 20-50%
   dau_wau_ratio: number;
+  // New users per day (users whose first-ever request was on that day)
+  new_users_by_day: { day: string; count: number }[];
   // User type metrics
   unique_premium_users: number;
   unique_private_users: number;
@@ -54,6 +56,8 @@ interface AnalyticsStats {
   // Retention cohorts
   retention_cohorts: RetentionCohort[];
   top_repos: { repo: string; count: number }[];
+  // Repos that were the first thing a user saw when they first logged in
+  first_landing_repos: { repo: string; count: number; usernames: string[] }[];
   top_users: {
     username: string;
     profile_picture: string | null;
@@ -103,6 +107,9 @@ export class AnalyticsDO extends DurableObject<Env> {
     `);
     this.sql.exec(`
       CREATE INDEX IF NOT EXISTS idx_owner_repo ON analytics(owner, repo)
+    `);
+    this.sql.exec(`
+      CREATE INDEX IF NOT EXISTS idx_username_timestamp ON analytics(username, timestamp)
     `);
 
     // Migration: add user_private_granted and user_premium columns
@@ -185,6 +192,27 @@ export class AnalyticsDO extends DurableObject<Env> {
       )
       .toArray() as { repo: string; count: number }[];
 
+    // First landing repo for each user (the repo they first visited when logging in)
+    const firstLandingRepos = this.sql
+      .exec(
+        `SELECT first_repo as repo, GROUP_CONCAT(username) as usernames, COUNT(*) as count FROM (
+           SELECT username, owner || '/' || repo as first_repo FROM (
+             SELECT username, owner, repo, ROW_NUMBER() OVER (PARTITION BY username ORDER BY timestamp ASC) as rn
+             FROM analytics
+             WHERE username IS NOT NULL
+           ) WHERE rn = 1
+         )
+         GROUP BY first_repo
+         ORDER BY count DESC
+         LIMIT 15`,
+      )
+      .toArray()
+      .map((row: any) => ({
+        repo: row.repo as string,
+        count: row.count as number,
+        usernames: (row.usernames as string).split(","),
+      })) as { repo: string; count: number; usernames: string[] }[];
+
     const topUsers = this.sql
       .exec(
         `SELECT username, profile_picture, COUNT(*) as count, MAX(user_private_granted) as user_private_granted, MAX(user_premium) as user_premium
@@ -217,6 +245,22 @@ export class AnalyticsDO extends DurableObject<Env> {
       .exec(
         `SELECT strftime('%Y-%m-%d', timestamp/1000, 'unixepoch') as day, COUNT(*) as count
          FROM analytics WHERE timestamp > ?
+         GROUP BY day ORDER BY day`,
+        since,
+      )
+      .toArray() as { day: string; count: number }[];
+
+    // New users by day (users whose first-ever request was on that day)
+    const newUsersByDay = this.sql
+      .exec(
+        `SELECT strftime('%Y-%m-%d', first_seen/1000, 'unixepoch') as day, COUNT(*) as count
+         FROM (
+           SELECT MIN(timestamp) as first_seen
+           FROM analytics
+           WHERE username IS NOT NULL
+           GROUP BY username
+         )
+         WHERE first_seen > ?
          GROUP BY day ORDER BY day`,
         since,
       )
@@ -328,12 +372,14 @@ export class AnalyticsDO extends DurableObject<Env> {
       mau,
       dau_mau_ratio: dauMauRatio,
       dau_wau_ratio: dauWauRatio,
+      new_users_by_day: newUsersByDay,
       unique_premium_users: uniquePremiumUsers,
       unique_private_users: uniquePrivateUsers,
       premium_to_private_ratio: premiumToPrivateRatio,
       premium_users_list: premiumUsersList,
       retention_cohorts: retentionCohorts,
       top_repos: topRepos,
+      first_landing_repos: firstLandingRepos,
       top_users: topUsers,
       requests_by_hour: requestsByHour,
       requests_by_day: requestsByDay,
@@ -362,92 +408,94 @@ export class AnalyticsDO extends DurableObject<Env> {
   private calculateRetentionCohorts(): RetentionCohort[] {
     const now = Date.now();
     const weekMs = 7 * 24 * 60 * 60 * 1000;
+    const currentWeekStart = this.getISOWeekStart(new Date(now));
+    const cutoff = currentWeekStart - 8 * weekMs;
 
-    // Get first seen timestamp for each user
+    // Query 1: first seen per user (uses idx_username_timestamp)
     const userFirstSeen = this.sql
       .exec(
         `SELECT username, MIN(timestamp) as first_seen
          FROM analytics
-         WHERE username IS NOT NULL
+         WHERE username IS NOT NULL AND timestamp >= ?
          GROUP BY username`,
+        cutoff,
       )
       .toArray() as { username: string; first_seen: number }[];
 
-    // Group users into weekly cohorts (last 8 weeks, excluding current week)
-    const cohorts: Map<
-      string,
-      { users: Set<string>; firstSeenStart: number }
-    > = new Map();
+    // Build cohort map
+    const userCohort: Map<string, { cohortKey: string; weekStartMs: number }> = new Map();
+    const cohortSizes: Map<string, { count: number; weekStartMs: number }> = new Map();
 
     for (const user of userFirstSeen) {
-      // Calculate which week this user was first seen
-      const weeksAgo = Math.floor((now - user.first_seen) / weekMs);
-      if (weeksAgo < 1 || weeksAgo > 8) continue; // Skip current week and anything older than 8 weeks
+      const cohortWeekStart = this.getISOWeekStart(new Date(user.first_seen));
+      const weeksAgo = Math.round((currentWeekStart - cohortWeekStart) / weekMs);
+      if (weeksAgo < 1 || weeksAgo > 8) continue;
 
       const cohortDate = new Date(user.first_seen);
       const year = cohortDate.getUTCFullYear();
       const weekNum = this.getISOWeek(cohortDate);
       const cohortKey = `${year}-W${weekNum.toString().padStart(2, "0")}`;
 
-      if (!cohorts.has(cohortKey)) {
-        // Start of that week
-        const weekStart =
-          now - weeksAgo * weekMs - ((now - user.first_seen) % weekMs);
-        cohorts.set(cohortKey, { users: new Set(), firstSeenStart: weekStart });
+      userCohort.set(user.username, { cohortKey, weekStartMs: cohortWeekStart });
+      const existing = cohortSizes.get(cohortKey);
+      if (existing) {
+        existing.count++;
+      } else {
+        cohortSizes.set(cohortKey, { count: 1, weekStartMs: cohortWeekStart });
       }
-      cohorts.get(cohortKey)!.users.add(user.username);
     }
 
-    // For each cohort, calculate retention for weeks 1-4
+    // Query 2: for each user, get the distinct weeks they were active (bucketed by week)
+    // This returns one row per user per active calendar week, much smaller than raw timestamps
+    const allActivity = this.sql
+      .exec(
+        `SELECT username, MIN(timestamp) as week_timestamp
+         FROM analytics
+         WHERE username IS NOT NULL AND timestamp >= ?
+         GROUP BY username, timestamp / ?`,
+        cutoff,
+        weekMs,
+      )
+      .toArray() as { username: string; week_timestamp: number }[];
+
+    // Count retained users per cohort per week offset
+    // Key: "cohortKey:weekOffset" -> Set of usernames
+    const retainedUsers: Map<string, Set<string>> = new Map();
+
+    for (const row of allActivity) {
+      const cohort = userCohort.get(row.username);
+      if (!cohort) continue;
+
+      const weekOffset = Math.floor((row.week_timestamp - cohort.weekStartMs) / weekMs);
+      if (weekOffset < 1 || weekOffset > 4) continue;
+
+      const key = `${cohort.cohortKey}:${weekOffset}`;
+      let set = retainedUsers.get(key);
+      if (!set) {
+        set = new Set();
+        retainedUsers.set(key, set);
+      }
+      set.add(row.username);
+    }
+
+    // Build results
     const results: RetentionCohort[] = [];
 
-    for (const [cohortKey, cohortData] of cohorts) {
-      const cohortUsers = Array.from(cohortData.users);
-      if (cohortUsers.length === 0) continue;
-
+    for (const [cohortKey, cohortData] of cohortSizes) {
       const retentionWeeks: number[] = [];
-
       for (let week = 1; week <= 4; week++) {
-        // Check how many users from this cohort were active in week N after their first week
-        const weekStart = cohortData.firstSeenStart + week * weekMs;
-        const weekEnd = weekStart + weekMs;
-
-        // Skip future weeks
+        const weekStart = cohortData.weekStartMs + week * weekMs;
         if (weekStart > now) {
-          retentionWeeks.push(-1); // -1 indicates N/A
+          retentionWeeks.push(-1);
           continue;
         }
-
-        // Batch users to avoid exceeding 100 parameter limit (97 users + 2 timestamp params)
-        const BATCH_SIZE = 97;
-        const activeUsers = new Set<string>();
-
-        for (let i = 0; i < cohortUsers.length; i += BATCH_SIZE) {
-          const batch = cohortUsers.slice(i, i + BATCH_SIZE);
-          const batchResults = this.sql
-            .exec(
-              `SELECT DISTINCT username
-               FROM analytics
-               WHERE username IN (${batch.map(() => "?").join(",")})
-                 AND timestamp >= ? AND timestamp < ?`,
-              ...batch,
-              weekStart,
-              weekEnd,
-            )
-            .toArray() as { username: string }[];
-
-          for (const row of batchResults) {
-            activeUsers.add(row.username);
-          }
-        }
-
-        const retentionPct = Math.round((activeUsers.size / cohortUsers.length) * 100);
-        retentionWeeks.push(retentionPct);
+        const retained = retainedUsers.get(`${cohortKey}:${week}`)?.size || 0;
+        retentionWeeks.push(Math.round((retained / cohortData.count) * 100));
       }
 
       results.push({
         cohort_week: cohortKey,
-        cohort_size: cohortUsers.length,
+        cohort_size: cohortData.count,
         week_1_retained: retentionWeeks[0],
         week_2_retained: retentionWeeks[1],
         week_3_retained: retentionWeeks[2],
@@ -455,7 +503,6 @@ export class AnalyticsDO extends DurableObject<Env> {
       });
     }
 
-    // Sort by cohort week descending (most recent first)
     return results.sort((a, b) => b.cohort_week.localeCompare(a.cohort_week));
   }
 
@@ -465,6 +512,14 @@ export class AnalyticsDO extends DurableObject<Env> {
     d.setUTCDate(d.getUTCDate() + 4 - dayNum);
     const yearStart = new Date(Date.UTC(d.getUTCFullYear(), 0, 1));
     return Math.ceil(((d.getTime() - yearStart.getTime()) / 86400000 + 1) / 7);
+  }
+
+  // Returns the Monday 00:00 UTC timestamp (ms) for the ISO week containing the given date
+  private getISOWeekStart(date: Date): number {
+    const d = new Date(Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), date.getUTCDate()));
+    const dayNum = d.getUTCDay() || 7; // Monday=1, Sunday=7
+    d.setUTCDate(d.getUTCDate() - (dayNum - 1)); // Go back to Monday
+    return d.getTime();
   }
 
   async getRecentRequests(limit: number = 100): Promise<AnalyticsDatapoint[]> {
@@ -953,6 +1008,12 @@ function generateAnalyticsHTML(stats: AnalyticsStats): string {
         </div>
       </div>
       <div class="chart-card">
+        <h3>New Users by Day (Last 30 Days)</h3>
+        <div class="chart-container">
+          <canvas id="newUsersChart"></canvas>
+        </div>
+      </div>
+      <div class="chart-card">
         <h3>Request Types</h3>
         <div class="chart-container">
           <canvas id="typeChart"></canvas>
@@ -1053,6 +1114,30 @@ function generateAnalyticsHTML(stats: AnalyticsStats): string {
                 </div>
               </div>
               <span class="list-item-count">${repo.count.toLocaleString()}</span>
+            </div>
+          `,
+                )
+                .join("")
+        }
+      </div>
+      <div class="list-card">
+        <h3>First Landing Repos</h3>
+        <p style="color: #888; font-size: 0.8em; margin: 0 0 8px 0;">The first repo users saw when they signed up</p>
+        ${
+          stats.first_landing_repos.length === 0
+            ? '<div class="empty-state">No data yet</div>'
+            : stats.first_landing_repos
+                .map(
+                  (repo) => `
+            <div class="list-item">
+              <div class="list-item-left">
+                <span class="list-item-name">${repo.repo}</span>
+                <div class="repo-actions">
+                  <a href="https://github.com/${repo.repo}" target="_blank" class="repo-btn repo-btn-github">GitHub</a>
+                  <a href="https://uithub.com/${repo.repo}" target="_blank" class="repo-btn repo-btn-uithub">UIThub</a>
+                </div>
+              </div>
+              <span class="list-item-count" title="${repo.usernames.slice(0, 10).join(", ")}${repo.usernames.length > 10 ? "..." : ""}">${repo.count} user${repo.count !== 1 ? "s" : ""}</span>
             </div>
           `,
                 )
@@ -1176,6 +1261,23 @@ function generateAnalyticsHTML(stats: AnalyticsStats): string {
           backgroundColor: 'rgba(16, 185, 129, 0.1)',
           fill: true,
           tension: 0.3
+        }]
+      },
+      options: chartOptions
+    });
+
+    // New users by day chart
+    const newUsersData = ${JSON.stringify(stats.new_users_by_day)};
+    new Chart(document.getElementById('newUsersChart'), {
+      type: 'bar',
+      data: {
+        labels: newUsersData.map(d => d.day),
+        datasets: [{
+          label: 'New Users',
+          data: newUsersData.map(d => d.count),
+          backgroundColor: 'rgba(245, 158, 11, 0.6)',
+          borderColor: '#f59e0b',
+          borderWidth: 1
         }]
       },
       options: chartOptions
