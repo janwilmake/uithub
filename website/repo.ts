@@ -1011,10 +1011,8 @@ function generateViewHTML(context: {
     </div>
   </header>
   <div class="content-container" style="max-width: 100vw; margin-top:35px;">
-    <pre id="textToCopy">${escapeHTML(fileString)}</pre>
+    <pre id="textToCopy"></pre>
   </div>
-
-  <textarea id="copyContent">${escapeHTML(fileString)}</textarea>
 
   <script>
     const data = ${JSON.stringify({
@@ -1027,11 +1025,30 @@ function generateViewHTML(context: {
 
     const copyButton = document.getElementById('copyButton');
     const buttonText = document.getElementById('buttonText');
-    const copyContent = document.getElementById('copyContent');
 
     copyButton.addEventListener('click', () => {
-      copyContent.select();
-      document.execCommand('copy');
+      const text = document.getElementById('textToCopy').textContent;
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(text).catch(() => {
+          const ta = document.createElement('textarea');
+          ta.value = text;
+          ta.style.position = 'fixed';
+          ta.style.left = '-9999px';
+          document.body.appendChild(ta);
+          ta.select();
+          document.execCommand('copy');
+          document.body.removeChild(ta);
+        });
+      } else {
+        const ta = document.createElement('textarea');
+        ta.value = text;
+        ta.style.position = 'fixed';
+        ta.style.left = '-9999px';
+        document.body.appendChild(ta);
+        ta.select();
+        document.execCommand('copy');
+        document.body.removeChild(ta);
+      }
       const originalText = buttonText.textContent;
       buttonText.textContent = 'Copied';
       setTimeout(() => { buttonText.textContent = originalText; }, 1000);
@@ -1457,7 +1474,30 @@ function buildSuccessResponse(
       modalContext
     });
 
-    return new Response(viewHtml, {
+    // Stream the response so the browser can render the page shell immediately,
+    // then show content progressively as it arrives — avoids white-screen on large repos.
+    const PRE_OPEN = '<pre id="textToCopy">';
+    const PRE_CLOSE = '</pre>';
+    const splitIdx = viewHtml.indexOf(PRE_OPEN);
+    const htmlBefore = viewHtml.substring(0, splitIdx + PRE_OPEN.length);
+    const htmlAfter = viewHtml.substring(splitIdx + PRE_OPEN.length + PRE_CLOSE.length);
+
+    const encoder = new TextEncoder();
+    const escaped = escapeHTML(result.fileString);
+    const CHUNK_SIZE = 65536; // 64 KB chunks
+
+    const stream = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(encoder.encode(htmlBefore));
+        for (let i = 0; i < escaped.length; i += CHUNK_SIZE) {
+          controller.enqueue(encoder.encode(escaped.substring(i, i + CHUNK_SIZE)));
+        }
+        controller.enqueue(encoder.encode(PRE_CLOSE + htmlAfter));
+        controller.close();
+      }
+    });
+
+    return new Response(stream, {
       headers: {
         "Content-Type": "text/html",
         "X-XSS-Protection": "1; mode=block",
