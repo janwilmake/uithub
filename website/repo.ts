@@ -1011,7 +1011,7 @@ function generateViewHTML(context: {
     </div>
   </header>
   <div class="content-container" style="max-width: 100vw; margin-top:35px;">
-    <pre id="textToCopy"></pre>
+    <pre id="textToCopy">${escapeHTML(fileString)}</pre>
   </div>
 
   <script>
@@ -1025,33 +1025,88 @@ function generateViewHTML(context: {
 
     const copyButton = document.getElementById('copyButton');
     const buttonText = document.getElementById('buttonText');
+    const pre = document.getElementById('textToCopy');
 
-    copyButton.addEventListener('click', () => {
-      const text = document.getElementById('textToCopy').textContent;
-      if (navigator.clipboard && navigator.clipboard.writeText) {
-        navigator.clipboard.writeText(text).catch(() => {
-          const ta = document.createElement('textarea');
-          ta.value = text;
-          ta.style.position = 'fixed';
-          ta.style.left = '-9999px';
-          document.body.appendChild(ta);
-          ta.select();
-          document.execCommand('copy');
-          document.body.removeChild(ta);
-        });
-      } else {
-        const ta = document.createElement('textarea');
-        ta.value = text;
-        ta.style.position = 'fixed';
-        ta.style.left = '-9999px';
-        document.body.appendChild(ta);
-        ta.select();
-        document.execCommand('copy');
-        document.body.removeChild(ta);
+    // Build the URL for raw text content (same URL but accept=text/plain).
+    const rawUrl = new URL(window.location.href);
+    rawUrl.searchParams.set('accept', 'text/plain');
+
+    let contentPromise = null;
+
+    // Fetch raw content and stream it into the pre for display.
+    // Returns a promise that resolves with the full text.
+    function loadContent() {
+      if (contentPromise) return contentPromise;
+      console.time('[uithub] content-fetch');
+      contentPromise = (async () => {
+        const res = await fetch(rawUrl.toString());
+        if (!res.ok || !res.body) throw new Error('fetch failed: ' + res.status);
+        const reader = res.body.getReader();
+        const decoder = new TextDecoder();
+        const chunks = [];
+        // Clear placeholder if any
+        pre.textContent = '';
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          const chunk = decoder.decode(value, { stream: true });
+          chunks.push(chunk);
+          // appendChild(createTextNode) is O(1) — avoids O(n²) textContent+=
+          pre.appendChild(document.createTextNode(chunk));
+        }
+        console.timeEnd('[uithub] content-fetch');
+        return chunks.join('');
+      })();
+      return contentPromise;
+    }
+
+    function fallbackCopy(text) {
+      const ta = document.createElement('textarea');
+      ta.value = text;
+      ta.style.cssText = 'position:fixed;left:-9999px';
+      document.body.appendChild(ta);
+      ta.select();
+      document.execCommand('copy');
+      document.body.removeChild(ta);
+    }
+
+    // If pre is empty the content is large — fetch and stream it in progressively.
+    // If pre already has content it was embedded server-side, no fetch needed.
+    const lazyLoad = pre.textContent.length === 0;
+    if (lazyLoad) loadContent().catch(() => {});
+
+    copyButton.addEventListener('click', async () => {
+      // Small repos: content already in pre, copy directly.
+      if (!lazyLoad) {
+        const text = pre.textContent;
+        if (navigator.clipboard && navigator.clipboard.writeText) {
+          await navigator.clipboard.writeText(text).catch(() => fallbackCopy(text));
+        } else {
+          fallbackCopy(text);
+        }
+        const original = buttonText.textContent;
+        buttonText.textContent = 'Copied';
+        setTimeout(() => { buttonText.textContent = original; }, 1500);
+        return;
       }
-      const originalText = buttonText.textContent;
-      buttonText.textContent = 'Copied';
-      setTimeout(() => { buttonText.textContent = originalText; }, 1000);
+      // Large repos: wait for fetch then copy.
+      const original = buttonText.textContent;
+      buttonText.textContent = 'Fetching\u2026';
+      copyButton.disabled = true;
+      try {
+        const text = await loadContent();
+        if (navigator.clipboard && navigator.clipboard.writeText) {
+          await navigator.clipboard.writeText(text).catch(() => fallbackCopy(text));
+        } else {
+          fallbackCopy(text);
+        }
+        buttonText.textContent = 'Copied';
+      } catch (e) {
+        console.error('[uithub] copy failed', e);
+        buttonText.textContent = 'Error';
+      }
+      copyButton.disabled = false;
+      setTimeout(() => { buttonText.textContent = original; }, 1500);
     });
 
     // Search option state
@@ -1459,11 +1514,13 @@ function buildSuccessResponse(
     const title = `${owner}/${repo} - uithub`;
     const description = `LLM context for ${repo}. /${path}${branchPart} contains ${result.tokens} tokens.`;
 
+    // For large repos (>1M tokens) load content client-side to avoid slow page loads.
+    const lazyLoad = result.tokens > 1_000_000;
     const viewHtml = generateViewHTML({
       url,
       title,
       description,
-      fileString: result.fileString,
+      fileString: lazyLoad ? '' : result.fileString,
       tokens: result.tokens,
       totalTokens: result.totalTokens,
       totalLines: result.totalLines,
@@ -1474,30 +1531,7 @@ function buildSuccessResponse(
       modalContext
     });
 
-    // Stream the response so the browser can render the page shell immediately,
-    // then show content progressively as it arrives — avoids white-screen on large repos.
-    const PRE_OPEN = '<pre id="textToCopy">';
-    const PRE_CLOSE = '</pre>';
-    const splitIdx = viewHtml.indexOf(PRE_OPEN);
-    const htmlBefore = viewHtml.substring(0, splitIdx + PRE_OPEN.length);
-    const htmlAfter = viewHtml.substring(splitIdx + PRE_OPEN.length + PRE_CLOSE.length);
-
-    const encoder = new TextEncoder();
-    const escaped = escapeHTML(result.fileString);
-    const CHUNK_SIZE = 65536; // 64 KB chunks
-
-    const stream = new ReadableStream<Uint8Array>({
-      start(controller) {
-        controller.enqueue(encoder.encode(htmlBefore));
-        for (let i = 0; i < escaped.length; i += CHUNK_SIZE) {
-          controller.enqueue(encoder.encode(escaped.substring(i, i + CHUNK_SIZE)));
-        }
-        controller.enqueue(encoder.encode(PRE_CLOSE + htmlAfter));
-        controller.close();
-      }
-    });
-
-    return new Response(stream, {
+    return new Response(viewHtml, {
       headers: {
         "Content-Type": "text/html",
         "X-XSS-Protection": "1; mode=block",
