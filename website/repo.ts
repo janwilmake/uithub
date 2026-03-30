@@ -531,6 +531,7 @@ function generateModalHTML(state: ModalState, context: ModalContext): string {
 function generateViewHTML(context: {
   url: URL;
   fileString: string;
+  lazyLoad: boolean;
   tree: any;
   tokenTree: any;
   tokens: number;
@@ -545,6 +546,7 @@ function generateViewHTML(context: {
   const {
     description,
     fileString,
+    lazyLoad,
     title,
     tokens,
     totalTokens,
@@ -689,30 +691,6 @@ function generateViewHTML(context: {
     }
     .content-container {
       ${contentBlurStyle}
-    }
-    #loadingIndicator {
-      display: none;
-      position: fixed;
-      top: 50%;
-      left: 50%;
-      transform: translate(-50%, -50%);
-      align-items: center;
-      gap: 10px;
-      z-index: 10;
-    }
-    #loadingIndicator.visible { display: flex; }
-    #loadingIndicator span {
-      width: 10px;
-      height: 10px;
-      border-radius: 50%;
-      background: var(--text-color);
-      animation: loading-pulse 1.2s ease-in-out infinite;
-    }
-    #loadingIndicator span:nth-child(2) { animation-delay: 0.2s; }
-    #loadingIndicator span:nth-child(3) { animation-delay: 0.4s; }
-    @keyframes loading-pulse {
-      0%, 80%, 100% { opacity: 0.15; transform: scale(0.7); }
-      40% { opacity: 1; transform: scale(1); }
     }
     .user-section {
       display: flex;
@@ -1035,7 +1013,6 @@ function generateViewHTML(context: {
     </div>
   </header>
   <div class="content-container" style="max-width: 100vw; margin-top:35px;">
-    <div id="loadingIndicator"><span></span><span></span><span></span></div>
     <pre id="textToCopy">${escapeHTML(fileString)}</pre>
   </div>
 
@@ -1043,7 +1020,8 @@ function generateViewHTML(context: {
     const data = ${JSON.stringify({
       default_branch,
       tokens: totalTokens,
-      totalLines
+      totalLines,
+      lazyLoad
     })};
     const tree = ${JSON.stringify(tree)};
     const tokenTree = ${JSON.stringify(tokenTree)};
@@ -1058,35 +1036,13 @@ function generateViewHTML(context: {
 
     let contentPromise = null;
 
-    // Fetch raw content and stream it into the pre for display.
-    // Returns a promise that resolves with the full text.
+    // Fetch full raw content. Cached after first call.
     function loadContent() {
       if (contentPromise) return contentPromise;
-      console.time('[uithub] content-fetch');
-      contentPromise = (async () => {
-        const res = await fetch(rawUrl.toString());
-        if (!res.ok || !res.body) throw new Error('fetch failed: ' + res.status);
-        const reader = res.body.getReader();
-        const decoder = new TextDecoder();
-        const chunks = [];
-        let firstChunk = true;
-        while (true) {
-          const { done, value } = await reader.read();
-          if (done) break;
-          if (firstChunk) {
-            firstChunk = false;
-            pre.textContent = '';
-            const ind = document.getElementById('loadingIndicator');
-            if (ind) ind.classList.remove('visible');
-          }
-          const chunk = decoder.decode(value, { stream: true });
-          chunks.push(chunk);
-          // appendChild(createTextNode) is O(1) — avoids O(n²) textContent+=
-          pre.appendChild(document.createTextNode(chunk));
-        }
-        console.timeEnd('[uithub] content-fetch');
-        return chunks.join('');
-      })();
+      contentPromise = fetch(rawUrl.toString()).then(res => {
+        if (!res.ok) throw new Error('fetch failed: ' + res.status);
+        return res.text();
+      });
       return contentPromise;
     }
 
@@ -1100,51 +1056,42 @@ function generateViewHTML(context: {
       document.body.removeChild(ta);
     }
 
-    // If pre is empty the content is large — fetch and stream it in progressively.
-    // If pre already has content it was embedded server-side, no fetch needed.
-    const lazyLoad = pre.textContent.length === 0;
-    if (lazyLoad) {
-      const indicator = document.getElementById('loadingIndicator');
-      indicator.classList.add('visible');
+    // Large repos: first 200k tokens are embedded, full content loads in background.
+    // When fetch completes, replace the truncated pre with the full text.
+    if (data.lazyLoad) {
       loadContent()
-        .then(() => { indicator.classList.remove('visible'); })
-        .catch(() => {
-          indicator.classList.remove('visible');
-          pre.textContent = 'Failed to load content.';
-        });
+        .then(text => { pre.textContent = text; })
+        .catch(() => {});
     }
 
     copyButton.addEventListener('click', async () => {
-      // Small repos: content already in pre, copy directly.
-      if (!lazyLoad) {
+      const original = buttonText.textContent;
+      if (data.lazyLoad) {
+        // Wait for full content if still loading, then copy.
+        buttonText.textContent = 'Fetching\u2026';
+        copyButton.disabled = true;
+        try {
+          const text = await loadContent();
+          if (navigator.clipboard && navigator.clipboard.writeText) {
+            await navigator.clipboard.writeText(text).catch(() => fallbackCopy(text));
+          } else {
+            fallbackCopy(text);
+          }
+          buttonText.textContent = 'Copied';
+        } catch (e) {
+          console.error('[uithub] copy failed', e);
+          buttonText.textContent = 'Error';
+        }
+        copyButton.disabled = false;
+      } else {
         const text = pre.textContent;
         if (navigator.clipboard && navigator.clipboard.writeText) {
           await navigator.clipboard.writeText(text).catch(() => fallbackCopy(text));
         } else {
           fallbackCopy(text);
         }
-        const original = buttonText.textContent;
         buttonText.textContent = 'Copied';
-        setTimeout(() => { buttonText.textContent = original; }, 1500);
-        return;
       }
-      // Large repos: wait for fetch then copy.
-      const original = buttonText.textContent;
-      buttonText.textContent = 'Fetching\u2026';
-      copyButton.disabled = true;
-      try {
-        const text = await loadContent();
-        if (navigator.clipboard && navigator.clipboard.writeText) {
-          await navigator.clipboard.writeText(text).catch(() => fallbackCopy(text));
-        } else {
-          fallbackCopy(text);
-        }
-        buttonText.textContent = 'Copied';
-      } catch (e) {
-        console.error('[uithub] copy failed', e);
-        buttonText.textContent = 'Error';
-      }
-      copyButton.disabled = false;
       setTimeout(() => { buttonText.textContent = original; }, 1500);
     });
 
@@ -1474,6 +1421,7 @@ function buildPlaceholderHtmlResponse(context: {
     title,
     description,
     fileString: placeholderFileString,
+    lazyLoad: false,
     tokens: 0,
     totalTokens: 0,
     totalLines: 0,
@@ -1553,13 +1501,15 @@ function buildSuccessResponse(
     const title = `${owner}/${repo} - uithub`;
     const description = `LLM context for ${repo}. /${path}${branchPart} contains ${result.tokens} tokens.`;
 
-    // For large repos (>1M tokens) load content client-side to avoid slow page loads.
-    const lazyLoad = result.tokens > 1_000_000;
+    // Embed up to 200k tokens inline for immediate display; fetch the rest client-side.
+    const INLINE_CHAR_LIMIT = 200_000 * 5; // ~200k tokens at 5 chars/token
+    const lazyLoad = result.fileString.length > INLINE_CHAR_LIMIT;
     const viewHtml = generateViewHTML({
       url,
       title,
       description,
-      fileString: lazyLoad ? '' : result.fileString,
+      lazyLoad,
+      fileString: lazyLoad ? result.fileString.substring(0, INLINE_CHAR_LIMIT) : result.fileString,
       tokens: result.tokens,
       totalTokens: result.totalTokens,
       totalLines: result.totalLines,
