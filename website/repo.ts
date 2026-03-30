@@ -690,6 +690,30 @@ function generateViewHTML(context: {
     .content-container {
       ${contentBlurStyle}
     }
+    #loadingIndicator {
+      display: none;
+      position: fixed;
+      top: 50%;
+      left: 50%;
+      transform: translate(-50%, -50%);
+      align-items: center;
+      gap: 10px;
+      z-index: 10;
+    }
+    #loadingIndicator.visible { display: flex; }
+    #loadingIndicator span {
+      width: 10px;
+      height: 10px;
+      border-radius: 50%;
+      background: var(--text-color);
+      animation: loading-pulse 1.2s ease-in-out infinite;
+    }
+    #loadingIndicator span:nth-child(2) { animation-delay: 0.2s; }
+    #loadingIndicator span:nth-child(3) { animation-delay: 0.4s; }
+    @keyframes loading-pulse {
+      0%, 80%, 100% { opacity: 0.15; transform: scale(0.7); }
+      40% { opacity: 1; transform: scale(1); }
+    }
     .user-section {
       display: flex;
       align-items: center;
@@ -1011,6 +1035,7 @@ function generateViewHTML(context: {
     </div>
   </header>
   <div class="content-container" style="max-width: 100vw; margin-top:35px;">
+    <div id="loadingIndicator"><span></span><span></span><span></span></div>
     <pre id="textToCopy">${escapeHTML(fileString)}</pre>
   </div>
 
@@ -1044,11 +1069,16 @@ function generateViewHTML(context: {
         const reader = res.body.getReader();
         const decoder = new TextDecoder();
         const chunks = [];
-        // Clear placeholder if any
-        pre.textContent = '';
+        let firstChunk = true;
         while (true) {
           const { done, value } = await reader.read();
           if (done) break;
+          if (firstChunk) {
+            firstChunk = false;
+            pre.textContent = '';
+            const ind = document.getElementById('loadingIndicator');
+            if (ind) ind.classList.remove('visible');
+          }
           const chunk = decoder.decode(value, { stream: true });
           chunks.push(chunk);
           // appendChild(createTextNode) is O(1) — avoids O(n²) textContent+=
@@ -1073,7 +1103,16 @@ function generateViewHTML(context: {
     // If pre is empty the content is large — fetch and stream it in progressively.
     // If pre already has content it was embedded server-side, no fetch needed.
     const lazyLoad = pre.textContent.length === 0;
-    if (lazyLoad) loadContent().catch(() => {});
+    if (lazyLoad) {
+      const indicator = document.getElementById('loadingIndicator');
+      indicator.classList.add('visible');
+      loadContent()
+        .then(() => { indicator.classList.remove('visible'); })
+        .catch(() => {
+          indicator.classList.remove('visible');
+          pre.textContent = 'Failed to load content.';
+        });
+    }
 
     copyButton.addEventListener('click', async () => {
       // Small repos: content already in pre, copy directly.
