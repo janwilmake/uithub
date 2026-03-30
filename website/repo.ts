@@ -531,6 +531,7 @@ function generateModalHTML(state: ModalState, context: ModalContext): string {
 function generateViewHTML(context: {
   url: URL;
   fileString: string;
+  lazyLoad: boolean;
   tree: any;
   tokenTree: any;
   tokens: number;
@@ -545,6 +546,7 @@ function generateViewHTML(context: {
   const {
     description,
     fileString,
+    lazyLoad,
     title,
     tokens,
     totalTokens,
@@ -1014,27 +1016,83 @@ function generateViewHTML(context: {
     <pre id="textToCopy">${escapeHTML(fileString)}</pre>
   </div>
 
-  <textarea id="copyContent">${escapeHTML(fileString)}</textarea>
-
   <script>
     const data = ${JSON.stringify({
       default_branch,
       tokens: totalTokens,
-      totalLines
+      totalLines,
+      lazyLoad
     })};
     const tree = ${JSON.stringify(tree)};
     const tokenTree = ${JSON.stringify(tokenTree)};
 
     const copyButton = document.getElementById('copyButton');
     const buttonText = document.getElementById('buttonText');
-    const copyContent = document.getElementById('copyContent');
+    const pre = document.getElementById('textToCopy');
 
-    copyButton.addEventListener('click', () => {
-      copyContent.select();
+    // Build the URL for raw text content (same URL but accept=text/plain).
+    const rawUrl = new URL(window.location.href);
+    rawUrl.searchParams.set('accept', 'text/plain');
+
+    let contentPromise = null;
+
+    // Fetch full raw content. Cached after first call.
+    function loadContent() {
+      if (contentPromise) return contentPromise;
+      contentPromise = fetch(rawUrl.toString()).then(res => {
+        if (!res.ok) throw new Error('fetch failed: ' + res.status);
+        return res.text();
+      });
+      return contentPromise;
+    }
+
+    function fallbackCopy(text) {
+      const ta = document.createElement('textarea');
+      ta.value = text;
+      ta.style.cssText = 'position:fixed;left:-9999px';
+      document.body.appendChild(ta);
+      ta.select();
       document.execCommand('copy');
-      const originalText = buttonText.textContent;
-      buttonText.textContent = 'Copied';
-      setTimeout(() => { buttonText.textContent = originalText; }, 1000);
+      document.body.removeChild(ta);
+    }
+
+    // Large repos: first 200k tokens are embedded, full content loads in background.
+    // When fetch completes, replace the truncated pre with the full text.
+    if (data.lazyLoad) {
+      loadContent()
+        .then(text => { pre.textContent = text; })
+        .catch(() => {});
+    }
+
+    copyButton.addEventListener('click', async () => {
+      const original = buttonText.textContent;
+      if (data.lazyLoad) {
+        // Wait for full content if still loading, then copy.
+        buttonText.textContent = 'Fetching\u2026';
+        copyButton.disabled = true;
+        try {
+          const text = await loadContent();
+          if (navigator.clipboard && navigator.clipboard.writeText) {
+            await navigator.clipboard.writeText(text).catch(() => fallbackCopy(text));
+          } else {
+            fallbackCopy(text);
+          }
+          buttonText.textContent = 'Copied';
+        } catch (e) {
+          console.error('[uithub] copy failed', e);
+          buttonText.textContent = 'Error';
+        }
+        copyButton.disabled = false;
+      } else {
+        const text = pre.textContent;
+        if (navigator.clipboard && navigator.clipboard.writeText) {
+          await navigator.clipboard.writeText(text).catch(() => fallbackCopy(text));
+        } else {
+          fallbackCopy(text);
+        }
+        buttonText.textContent = 'Copied';
+      }
+      setTimeout(() => { buttonText.textContent = original; }, 1500);
     });
 
     // Search option state
@@ -1363,6 +1421,7 @@ function buildPlaceholderHtmlResponse(context: {
     title,
     description,
     fileString: placeholderFileString,
+    lazyLoad: false,
     tokens: 0,
     totalTokens: 0,
     totalLines: 0,
@@ -1442,11 +1501,15 @@ function buildSuccessResponse(
     const title = `${owner}/${repo} - uithub`;
     const description = `LLM context for ${repo}. /${path}${branchPart} contains ${result.tokens} tokens.`;
 
+    // Embed up to 200k tokens inline for immediate display; fetch the rest client-side.
+    const INLINE_CHAR_LIMIT = 200_000 * 5; // ~200k tokens at 5 chars/token
+    const lazyLoad = result.fileString.length > INLINE_CHAR_LIMIT;
     const viewHtml = generateViewHTML({
       url,
       title,
       description,
-      fileString: result.fileString,
+      lazyLoad,
+      fileString: lazyLoad ? result.fileString.substring(0, INLINE_CHAR_LIMIT) : result.fileString,
       tokens: result.tokens,
       totalTokens: result.totalTokens,
       totalLines: result.totalLines,
