@@ -310,7 +310,8 @@ export function getSessionFromCookie(request: Request): {
   const sessionToken = cookies.session;
   if (!sessionToken) return { accessToken: null, user: null, scopes: "" };
   try {
-    const sessionData = JSON.parse(atob(sessionToken));
+    const bytes = Uint8Array.from(atob(sessionToken), c => c.charCodeAt(0));
+    const sessionData = JSON.parse(new TextDecoder().decode(bytes));
     if (Date.now() > sessionData.exp)
       return { accessToken: null, user: null, scopes: "" };
     return {
@@ -1232,7 +1233,9 @@ async function handleCallback(request: Request, env: Env): Promise<Response> {
       scopes: grantedScopes,
       exp: Date.now() + 7 * 24 * 3600 * 1000
     };
-    const sessionToken = btoa(JSON.stringify(sessionData));
+    const sessionToken = btoa(
+      String.fromCharCode(...new TextEncoder().encode(JSON.stringify(sessionData)))
+    );
 
     // Build the authorize URL with all original OAuth params
     const authorizeUrl = new URL(`${url.origin}/authorize`);
@@ -1279,7 +1282,9 @@ async function handleCallback(request: Request, env: Env): Promise<Response> {
     scopes: grantedScopes,
     exp: Date.now() + 7 * 24 * 3600 * 1000
   };
-  const sessionToken = btoa(JSON.stringify(sessionData));
+  const sessionToken = btoa(
+    String.fromCharCode(...new TextEncoder().encode(JSON.stringify(sessionData)))
+  );
 
   const headers = new Headers({ Location: state.redirectTo || "/" });
   headers.append(

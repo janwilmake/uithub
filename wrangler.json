@@ -20,8 +20,20 @@
     { "tag": "v3", "new_sqlite_classes": ["FileDO"] },
     { "tag": "v4", "deleted_classes": ["FileDO"] }
   ],
+  "observability": {
+    "logs": {
+      "enabled": false,
+      "invocation_logs": true
+    }
+  },
   "env": {
     "prod": {
+      "observability": {
+        "logs": {
+          "enabled": false,
+          "invocation_logs": true
+        }
+      },
       "routes": [
         { "custom_domain": true, "pattern": "uithub.com" },
         { "custom_domain": true, "pattern": "www.uithub.com" }
